@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Action test/validation workflow
-name: "Test GitHub Action 🧪"
+name: "Test Maven Build Action ☕️"
 
 # yamllint disable-line rule:truthy
 on:
@@ -20,13 +20,13 @@ concurrency:
 permissions: {}
 
 jobs:
-  ### Test the GitHub Action in this Repository ###
-  tests:
-    name: "Test local GitHub Action"
+  ### Test the Maven Build Action with nonrtric-plt-rappmanager ###
+  test-maven-build:
+    name: "Test Builds"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 20
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -34,42 +34,127 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: "Checkout repository"
+      - name: "Checkout maven-build-action repository"
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: maven-build-action
 
-      # Perform setup prior to running test(s)
+      - name: "Checkout nonrtric-plt-rappmanager repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: o-ran-sc/nonrtric-plt-rappmanager
+          path: nonrtric-plt-rappmanager
+
+      - name: "Setup Go"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: 'stable'
+
       - name: "Testing setup step"
         shell: bash
         run: |
           # Testing setup step
-          echo "Testing setup step"
+          echo "Testing maven-build-action"
+          echo "Using O-RAN-SC nonrtric-plt-rappmanager project"
+          echo "Go version: $(go version)"
+          echo "Project structure:"
+          ls -la nonrtric-plt-rappmanager/
           echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: "Running local action: ${{ github.repository }}"
-        uses: ./
+      - name: "Running maven-build-action (with global-settings)"
+        uses: ./maven-build-action
         with:
-          input: "test input 💬"
+          # yamllint disable rule:line-length
+          global-settings: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                      xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                          https://maven.apache.org/xsd/settings-1.0.0.xsd">
+              <profiles>
+                <profile>
+                  <id>ossrh</id>
+                  <activation>
+                    <activeByDefault>true</activeByDefault>
+                  </activation>
+                  <repositories>
+                    <repository>
+                      <id>central</id>
+                      <url>https://repo1.maven.org/maven2</url>
+                    </repository>
+                  </repositories>
+                </profile>
+              </profiles>
+            </settings>
+          jdk-version: '17'
+          mvn-version: '3.9.11'
+          path_prefix: 'nonrtric-plt-rappmanager'
+          mvn-phases: 'clean compile test'
+          mvn-opts: >-
+            -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+            -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
+          # yamllint enable rule:line-length
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Running maven-build-action (without global-settings)"
+        uses: ./maven-build-action
+        with:
+          jdk-version: '17'
+          mvn-version: '3.9.11'
+          path_prefix: 'nonrtric-plt-rappmanager'
+          mvn-phases: 'clean compile'
+          # yamllint disable rule:line-length
+          mvn-opts: >-
+            -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+            -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
+          # yamllint enable rule:line-length
+
+      - name: "Summary: maven-build-action"
         shell: bash
         run: |
-          # Local action validation
-          echo "Validated local action: ${{ github.repository }}"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          # Summary: maven-build-action
+          echo "Test builds completed successfully ✅"
+          echo "Test builds completed successfully ✅" >> "$GITHUB_STEP_SUMMARY"
+
+  ### Test failure scenarios ###
+  test-failure-scenarios:
+    name: "Test Build Failure"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
+      - name: "Test failure: Invalid path_prefix"
         uses: ./
-        id: failure
+        id: failure-test
         continue-on-error: true
         with:
-          invalid_input: "Some garbage"
+          jdk-version: '17'
+          mvn-version: '3.9.11'
+          path_prefix: 'non-existent-directory'
 
       # Failure testing is also important
       - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+        if: steps.failure-test.outcome == 'success'
         shell: bash
         run: |
           # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
+          echo "Error: previous test step did NOT fail as expected ❌"
           exit 1
+
+      - name: "Validated failure scenario"
+        if: steps.failure-test.outcome == 'failure'
+        shell: bash
+        run: |
+          # Validated failure scenario
+          echo "Validated failure scenario: invalid path_prefix ✅"
