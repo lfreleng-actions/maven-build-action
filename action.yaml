@@ -2,36 +2,165 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+# maven-build-action
+name: "☕️ Build Maven Project"
+description: "Setup Maven and build the Java project"
 
 inputs:
-  input:
-    description: "Description of input"
-    required: true
-
-outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  # Mandatory inputs
+  global-settings:
+    description: 'Maven global settings file'
+    required: false
+  # Optional inputs
+  path_prefix:
+    description: 'Directory location containing project code'
+    required: false
+    default: '.'
+  jdk-version:
+    description: 'OpenJDK version'
+    required: false
+    default: "21"
+  distribution:
+    description: 'OpenJDK distribution'
+    required: false
+    default: 'temurin'
+  mvn-version:
+    description: 'Maven version'
+    required: false
+    default: '3.9.11'
+  mvn-params:
+    description: 'Maven parameters to pass to the mvn command'
+    required: false
+  mvn-phases:
+    description: 'Comma separated list of phases to execute'
+    required: false
+    default: 'clean deploy'
+  mvn-opts:
+    description: 'Maven options'
+    required: false
+    # yamllint disable rule:line-length
+    default: >-
+      -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+      -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
+      -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo
+    # yamllint enable rule:line-length
+  mvn-pom-file:
+    description: 'Path to pom.xml file'
+    required: false
+    default: 'pom.xml'
+  mvn-profiles:
+    description: 'Comma-delimited list of profiles to activate'
+    required: false
+  env-vars:
+    # yamllint disable-line rule:line-length
+    description: "Pass GitHub variables to be exported as environment variables via `toJSON(vars)` or specific variables encoded in JSON format"
+    required: false
+    default: '{}'
+  env-secrets:
+    # yamllint disable-line rule:line-length
+    description: "Pass GitHub secrets to be exported as environment variables via `toJSON(secrets)` or specific secrets encoded in JSON format"
+    required: false
+    default: '{}'
+  run-jacoco:
+    description: 'Boolean defining whether Jacoco should be run'
+    required: false
+    default: 'true'
 
 runs:
-  using: "composite"
+  using: 'composite'
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: 'Setup action/environment'
       shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
       run: |
-        # Friendly Name
-        input="${{ inputs.input }}"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
-          exit 1
+        # Verify action/environment
+        path_prefix="${INPUT_PATH_PREFIX}"
+        # Verify path_prefix is a valid directory path
+        if [ ! -d "$path_prefix" ]; then
+          echo 'Error: invalid path/prefix to project directory ❌'; exit 1
         fi
 
-        echo "output=$input" >> "$GITHUB_ENV"
-        echo "output=$input" >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+    - name: 'Setup Java'
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+      with:
+        java-version: ${{ inputs.jdk-version }}
+        distribution: ${{ inputs.distribution }}
+
+    - name: 'Setup Maven'
+      # yamllint disable-line rule:line-length
+      uses: s4u/setup-maven-action@4f7fb9d9675e899ca81c6161dadbba0189a4ebb1 # v1.18.0
+      with:
+        java-version: ${{ inputs.jdk-version }}
+        maven-version: ${{ inputs.mvn-version }}
+        checkout-enabled: false # Perform prior to calling this action
+
+    - name: 'Export env variables'
+      # yamllint disable-line rule:line-length
+      uses: infovista-opensource/vars-to-env-action@3d3e7c8ae1e9e5fcd9ce83e56ab85a6a135d2ffa # v2.0.0
+      with:
+        secrets: ${{ inputs.env-vars }}
+
+    - name: 'Export env secrets'
+      # yamllint disable-line rule:line-length
+      uses: infovista-opensource/vars-to-env-action@3d3e7c8ae1e9e5fcd9ce83e56ab85a6a135d2ffa # v2.0.0
+      with:
+        secrets: ${{ inputs.env-secrets }}
+
+    - name: 'Build code with Maven'
+      shell: bash
+      env:
+        PATH_PREFIX: ${{ inputs.path_prefix }}
+        GLOBAL_SETTINGS: ${{ inputs.global-settings }}
+        MVN_PHASES: ${{ inputs.mvn-phases }}
+        MVN_POM_FILE: ${{ inputs.mvn-pom-file }}
+        MVN_PROFILES: ${{ inputs.mvn-profiles }}
+        MVN_OPTS: ${{ inputs.mvn-opts }}
+        MVN_PARAMS: ${{ inputs.mvn-params }}
+      # yamllint disable rule:line-length
+      run: |
+        echo "Maven build starting"
+
+        if [ -n "$GLOBAL_SETTINGS" ]; then
+          echo "$GLOBAL_SETTINGS" > global-settings.xml
+          echo "Using provided global settings:"
+          cat global-settings.xml
+          GLOBAL_SETTINGS_ARG="--global-settings global-settings.xml"
+        else
+          echo "No global settings provided, using Maven defaults"
+          GLOBAL_SETTINGS_ARG=""
+        fi
+
+        PROFILES_ARG=""
+        if [ -n "$MVN_PROFILES" ]; then
+          PROFILES_ARG="-P $MVN_PROFILES"
+        fi
+
+        mvn $MVN_PHASES \
+            -f "$PATH_PREFIX/$MVN_POM_FILE" \
+            -e \
+            $GLOBAL_SETTINGS_ARG \
+            $PROFILES_ARG \
+            -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo \
+            $MVN_OPTS $MVN_PARAMS
+      # yamllint enable rule:line-length
+
+    - name: 'Generate JaCoCo Badge'
+      id: jacoco
+      if: ${{ !env.ACT && inputs.run-jacoco }} # skip during local testing
+      # yamllint disable-line rule:line-length
+      uses: cicirello/jacoco-badge-generator@f33476a5a3fd5a4f77cb5eef2ebe728c1dd5b921 # v2.11.0
+      with:
+        badges-directory: badges
+        generate-branches-badge: true
+        generate-summary: true
+        on-missing-report: quiet
+
+    - name: Log coverage percentage
+      id: log-coverage
+      if: ${{ inputs.run-jacoco && steps.jacoco.outcome == 'success' }}
+      shell: bash
+      run: |
+        echo "coverage = ${{ steps.jacoco.outputs.coverage }}"
+        echo "branch coverage = ${{ steps.jacoco.outputs.branches }}"
