@@ -15,10 +15,14 @@ inputs:
     description: 'Directory location containing project code'
     required: false
     default: '.'
-  jdk-version:
+  java-version:
     description: 'OpenJDK version'
     required: false
-    default: "21"
+    default: '21'
+  setup-java:
+    description: 'Enable or disable Java setup'
+    required: false
+    default: 'true'
   distribution:
     description: 'OpenJDK distribution'
     required: false
@@ -81,17 +85,18 @@ runs:
         fi
 
     - name: 'Setup Java'
+      if: ${{ inputs.setup-java == 'true' }}
       # yamllint disable-line rule:line-length
       uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
       with:
-        java-version: ${{ inputs.jdk-version }}
+        java-version: ${{ inputs.java-version }}
         distribution: ${{ inputs.distribution }}
 
     - name: 'Setup Maven'
       # yamllint disable-line rule:line-length
       uses: s4u/setup-maven-action@6c4e9964d4ecb8f1026310cd8618791fd51a8016 # v1.19.0
       with:
-        java-version: ${{ inputs.jdk-version }}
+        java-version: ${{ inputs.java-version }}
         maven-version: ${{ inputs.mvn-version }}
         checkout-enabled: false # Perform prior to calling this action
 

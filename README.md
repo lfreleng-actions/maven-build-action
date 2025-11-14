@@ -29,7 +29,7 @@ steps:
             </server>
           </servers>
         </settings>
-      jdk-version: "17"
+      java-version: "17"
       distribution: "temurin"
       mvn-version: "3.9.11"
       mvn-phases: "clean deploy"
@@ -46,7 +46,8 @@ steps:
 | ----------------- | -------- | ------- | ----------- |
 | global-settings   | False    | -       | Maven global settings file |
 | path_prefix       | False    | `.`     | Directory location containing project code |
-| jdk-version       | False    | `21`    | OpenJDK version |
+| java-version      | False    | `21`    | OpenJDK version(s) installed |
+| setup-java        | False    | `true`  | Enable or disable Java setup |
 | distribution      | False    | `temurin` | OpenJDK distribution |
 | mvn-version       | False    | `3.9.11` | Maven version |
 | mvn-params        | False    | -       | Maven parameters to pass to the mvn command |
@@ -65,6 +66,21 @@ steps:
 -Dmaven.repo.local=/tmp/r
 -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
 -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo
+```
+
+### Using More Than One Java Version
+
+To install more than one JDK version, use the pipe `|` syntax, as described in
+the setup-java documentation:
+
+<https://github.com/actions/setup-java?tab=readme-ov-file#install-multiple-jdks>
+
+The last version becomes the default:
+
+```yaml
+java-version: |
+  17
+  21
 ```
 
 <!-- markdownlint-enable MD013 -->
