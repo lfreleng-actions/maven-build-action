@@ -87,7 +87,7 @@ jobs:
                 </profile>
               </profiles>
             </settings>
-          jdk-version: '17'
+          java-version: '17'
           mvn-version: '3.9.11'
           path_prefix: 'nonrtric-plt-rappmanager'
           mvn-phases: 'clean compile test'
@@ -99,7 +99,7 @@ jobs:
       - name: "Running maven-build-action (without global-settings)"
         uses: ./maven-build-action
         with:
-          jdk-version: '17'
+          java-version: '17'
           mvn-version: '3.9.11'
           path_prefix: 'nonrtric-plt-rappmanager'
           mvn-phases: 'clean compile'
@@ -139,7 +139,7 @@ jobs:
         id: failure-test
         continue-on-error: true
         with:
-          jdk-version: '17'
+          java-version: '17'
           mvn-version: '3.9.11'
           path_prefix: 'non-existent-directory'
 

@@ -7,19 +7,22 @@ name: "☕️ Build Maven Project"
 description: "Setup Maven and build the Java project"
 
 inputs:
-  # Mandatory inputs
+  # Optional inputs
   global-settings:
     description: 'Maven global settings file'
     required: false
-  # Optional inputs
   path_prefix:
     description: 'Directory location containing project code'
     required: false
     default: '.'
-  jdk-version:
+  java-version:
     description: 'OpenJDK version'
     required: false
-    default: "21"
+    default: '21'
+  setup-java:
+    description: 'Enable or disable Java setup'
+    required: false
+    default: 'true'
   distribution:
     description: 'OpenJDK distribution'
     required: false
@@ -62,7 +65,7 @@ inputs:
     required: false
     default: '{}'
   run-jacoco:
-    description: 'Boolean defining whether Jacoco should be run'
+    description: 'Boolean defining whether JaCoCo should be run'
     required: false
     default: 'true'
 
@@ -82,17 +85,18 @@ runs:
         fi
 
     - name: 'Setup Java'
+      if: ${{ inputs.setup-java == 'true' }}
       # yamllint disable-line rule:line-length
       uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
       with:
-        java-version: ${{ inputs.jdk-version }}
+        java-version: ${{ inputs.java-version }}
         distribution: ${{ inputs.distribution }}
 
     - name: 'Setup Maven'
       # yamllint disable-line rule:line-length
       uses: s4u/setup-maven-action@4f7fb9d9675e899ca81c6161dadbba0189a4ebb1 # v1.18.0
       with:
-        java-version: ${{ inputs.jdk-version }}
+        java-version: ${{ inputs.java-version }}
         maven-version: ${{ inputs.mvn-version }}
         checkout-enabled: false # Perform prior to calling this action
 
