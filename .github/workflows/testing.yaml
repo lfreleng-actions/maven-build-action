@@ -35,12 +35,12 @@ jobs:
           egress-policy: audit
 
       - name: "Checkout maven-build-action repository"
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           path: maven-build-action
 
       - name: "Checkout nonrtric-plt-rappmanager repository"
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           repository: o-ran-sc/nonrtric-plt-rappmanager
           path: nonrtric-plt-rappmanager
@@ -131,7 +131,7 @@ jobs:
           egress-policy: audit
 
       - name: "Checkout maven-build-action repository"
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       # yamllint disable-line rule:line-length
       - name: "Test failure: Invalid path_prefix"
