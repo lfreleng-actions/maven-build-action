@@ -42,22 +42,24 @@ steps:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name              | Required | Default | Description |
-| ----------------- | -------- | ------- | ----------- |
-| global-settings   | False    | -       | Maven global settings file |
-| path_prefix       | False    | `.`     | Directory location containing project code |
-| java-version      | False    | `21`    | OpenJDK version(s) installed |
-| setup-java        | False    | `true`  | Enable or disable Java setup |
-| distribution      | False    | `temurin` | OpenJDK distribution |
-| mvn-version       | False    | `3.9.11` | Maven version |
-| mvn-params        | False    | -       | Maven parameters to pass to the mvn command |
-| mvn-phases        | False    | `clean deploy` | Comma separated list of phases to execute |
-| mvn-opts          | False    | See below | Maven options |
-| mvn-pom-file      | False    | `pom.xml` | Path to pom.xml file |
-| mvn-profiles      | False    | -       | Comma-delimited list of profiles to activate |
-| env-vars          | False    | `{}`    | Pass GitHub variables for export as environment variables via `toJSON(vars)` or specific variables encoded in JSON format |
-| env-secrets       | False    | `{}`    | Pass GitHub secrets for export as environment variables via `toJSON(secrets)` or specific secrets encoded in JSON format |
-| run-jacoco        | False    | `true`  | Boolean defining whether to run Jacoco |
+| Name            | Required | Default        | Description                                                                                                               |
+| --------------- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| global-settings | False    | -              | Maven global settings file                                                                                                |
+| path_prefix     | False    | `.`            | Directory location containing project code                                                                                |
+| java-version    | False    | `21`           | OpenJDK version(s) installed                                                                                              |
+| setup-java      | False    | `true`         | Enable or disable Java setup                                                                                              |
+| distribution    | False    | `temurin`      | OpenJDK distribution                                                                                                      |
+| mvn-version     | False    | `3.9.11`       | Maven version                                                                                                             |
+| mvn-params      | False    | -              | Maven parameters to pass to the mvn command                                                                               |
+| mvn-phases      | False    | `clean deploy` | Comma separated list of phases to execute                                                                                 |
+| mvn-opts        | False    | See below      | Maven options                                                                                                             |
+| mvn-pom-file    | False    | `pom.xml`      | Path to pom.xml file                                                                                                      |
+| mvn-profiles    | False    | -              | Comma-delimited list of profiles to activate                                                                              |
+| env-vars        | False    | `{}`           | Pass GitHub variables for export as environment variables via `toJSON(vars)` or specific variables encoded in JSON format |
+| env-secrets     | False    | `{}`           | Pass GitHub secrets for export as environment variables via `toJSON(secrets)` or specific secrets encoded in JSON format  |
+| run-jacoco      | False    | `true`         | Boolean defining whether to run Jacoco                                                                                    |
+
+<!-- markdownlint-enable MD013 -->
 
 ### Default Maven Options (mvn-opts)
 
