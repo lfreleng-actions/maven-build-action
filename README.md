@@ -9,6 +9,12 @@ Setup Maven and build the Java project
 
 ## maven-build-action
 
+This action used to be alongside other actions in the repository below:
+
+<https://github.com/lfit/releng-reusable-workflows>
+
+Go there to get the revision history and other details prior to Oct 29th 2025.
+
 ## Usage Example
 
 <!-- markdownlint-disable MD046 -->
