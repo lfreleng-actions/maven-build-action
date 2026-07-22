@@ -64,6 +64,8 @@ steps:
 | env-vars        | False    | `{}`           | Pass GitHub variables for export as environment variables via `toJSON(vars)` or specific variables encoded in JSON format |
 | env-secrets     | False    | `{}`           | Pass GitHub secrets for export as environment variables via `toJSON(secrets)` or specific secrets encoded in JSON format  |
 | run-jacoco      | False    | `true`         | Boolean defining whether to run Jacoco                                                                                    |
+| artifact-upload | False    | `true`         | Upload the JaCoCo badges directory as a build artifact                                                                    |
+| artifact-name   | False    | -              | Uploaded artifact name (default: `maven-build-<job>`)                                                                     |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -95,12 +97,28 @@ java-version: |
 
 ## Outputs
 
-This action does not produce any direct outputs, but it will:
+<!-- markdownlint-disable MD013 -->
 
-- Build the Java project using Maven
-- Generate JaCoCo coverage reports (if enabled)
-- Deploy artifacts to the staging repository
-- Create coverage badges in the `badges` directory
+| Name            | Description                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| m2repo_path     | Absolute path to the Maven file deployment repository (m2repo) for downstream publish/stage actions |
+| m2repo_exists   | Whether the build produced the m2repo directory (`true`/`false`)                                    |
+| artifact_count  | Number of jar/pom/war files found in the m2repo                                                     |
+| coverage        | JaCoCo line coverage percentage (empty when JaCoCo did not run)                                     |
+| branch_coverage | JaCoCo branch coverage percentage (empty when JaCoCo did not run)                                   |
+| artifact_name   | Name of the uploaded JaCoCo badges artifact (empty when artifact upload disabled)                   |
+
+<!-- markdownlint-enable MD013 -->
+
+The action also:
+
+- Builds the Java project using Maven
+- Generates JaCoCo coverage reports and badges (if enabled)
+- Deploys artifacts to the file-based staging repository (`m2repo`)
+- Writes a build summary to `GITHUB_STEP_SUMMARY`
+
+Downstream publish/stage actions consume the built `m2repo` via the
+`m2repo_path` output; the calling workflow typically uploads it between jobs.
 
 ## Implementation Details
 
@@ -116,7 +134,10 @@ This action performs the following steps:
    options, and parameters
 6. **Generate JaCoCo Badge**: Creates coverage badges and summary (if JaCoCo
    runs and not executing locally)
-7. **Log Coverage**: Outputs coverage percentages to the build log
+7. **Generate build summary and outputs**: Publishes action outputs (m2repo
+   path, artifact count, coverage) and writes a `GITHUB_STEP_SUMMARY` table
+8. **Upload build artifacts**: Uploads the JaCoCo badges as a workflow
+   artifact (when `artifact-upload` enabled)
 
 The action uses pinned SHA versions for all external actions to ensure security
 and reproducibility.
