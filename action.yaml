@@ -157,10 +157,42 @@ runs:
         echo "Maven build starting"
 
         if [ -n "$GLOBAL_SETTINGS" ]; then
-          echo "$GLOBAL_SETTINGS" > global-settings.xml
-          echo "Using provided global settings:"
-          cat global-settings.xml
-          GLOBAL_SETTINGS_ARG="--global-settings global-settings.xml"
+          # Written under RUNNER_TEMP, not the workspace, and created with
+          # mktemp rather than at a fixed name.
+          #
+          # A settings document commonly carries repository credentials,
+          # and mvn below runs repository-controlled code -- plugins,
+          # annotation processors, tests -- as this user, in the
+          # workspace. A file kept there is simply readable by that code,
+          # and log masking does not protect a file on disk. Consumers
+          # such as security-workflows point this action at untrusted
+          # contributions, so that is not a remote scenario.
+          #
+          # A fixed name inside the checkout is separately unsafe: a
+          # contributor can commit a symlink at that path, and shell
+          # redirection follows one. mktemp yields an unpredictable name
+          # and creates it at 0600 whatever the umask.
+          #
+          # printf rather than echo, so the document is written verbatim
+          # rather than passed through escape interpretation. The content
+          # is deliberately not echoed to the log.
+          #
+          # RUNNER_TEMP is always set on a GitHub-hosted runner, but not
+          # on every local harness, and an unset value would place the
+          # file at the filesystem root. mktemp remains safe in any
+          # world-writable fallback: it creates atomically and refuses an
+          # existing name.
+          SETTINGS_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          GLOBAL_SETTINGS_FILE="$(
+            mktemp "${SETTINGS_DIR}/maven-global-settings.XXXXXXXXXX"
+          )"
+          # Remove it on the way out, whether or not the build succeeds,
+          # so a credentials file does not outlive the step that needs it
+          # and sit readable for the rest of the job.
+          trap 'rm -f "${GLOBAL_SETTINGS_FILE}"' EXIT
+          printf '%s' "$GLOBAL_SETTINGS" > "$GLOBAL_SETTINGS_FILE"
+          echo "Using provided global settings: $GLOBAL_SETTINGS_FILE"
+          GLOBAL_SETTINGS_ARG="--global-settings $GLOBAL_SETTINGS_FILE"
         else
           echo "No global settings provided, using Maven defaults"
           GLOBAL_SETTINGS_ARG=""
