@@ -78,6 +78,36 @@ steps:
 -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo
 ```
 
+### Workspace Variables in Maven Arguments
+
+The `mvn-params` and `mvn-opts` inputs expand a fixed list of names
+before Maven runs:
+
+`GITHUB_WORKSPACE`, `GITHUB_REPOSITORY`, `GITHUB_REF_NAME`, `GITHUB_SHA`,
+`GITHUB_RUN_ID`, `RUNNER_TEMP`, `RUNNER_OS`
+
+Both the `${NAME}` and `$NAME` forms work:
+
+```yaml
+mvn-params: '-Djacoco.dataFile=${GITHUB_WORKSPACE}/target/jacoco.exec'
+```
+
+Maven itself interpolates `${...}` where a value reaches it through POM
+interpolation, which leaves a user property a plugin reads directly, such
+as `-Djacoco.dataFile`, holding the literal text. Expanding these names
+first gives a caller the behaviour Jenkins had.
+
+Every other `${...}` reaches Maven as written, so Maven's own
+`${project.*}` and `${settings.*}` still resolve. A name outside the list
+stays literal even where the environment holds a value for it, which
+keeps a caller's `env-secrets` off the command line. Nothing in the
+expansion executes, so `$(...)`, backticks and `$((...))` reach Maven as
+written too.
+
+Both inputs split on whitespace, so a value carrying a space becomes more
+than one argument. The action names that case in the log rather than
+leaving Maven to fail on an argument nobody wrote.
+
 ### Using More Than One Java Version
 
 To install more than one JDK version, use the pipe `|` syntax, as described in
