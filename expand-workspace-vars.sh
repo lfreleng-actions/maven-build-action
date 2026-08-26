@@ -30,10 +30,10 @@ expand_workspace_vars() {
     head="${text%%'$'*}"
     rest="${text:${#head}+1}"
     if [[ "$rest" =~ ^\{[A-Za-z_][A-Za-z0-9_]*\} ]]; then
-      raw="$BASH_REMATCH"
+      raw="${BASH_REMATCH[0]}"
       name="${raw:1:${#raw}-2}"
     elif [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]* ]]; then
-      raw="$BASH_REMATCH"
+      raw="${BASH_REMATCH[0]}"
       name="$raw"
     else
       # A '$' introducing anything else -- '(', a backtick, a
