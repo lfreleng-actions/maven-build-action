@@ -17,6 +17,9 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ACTION="${REPO_ROOT}/action.yaml"
+# The resolver sources the workspace-variable expansion from the action
+# directory, so point that at the checkout under test.
+export GITHUB_ACTION_PATH="$REPO_ROOT"
 LOGIC="$(mktemp)"
 trap 'rm -f "$LOGIC"' EXIT
 
@@ -535,6 +538,31 @@ T_PREFIX='/tmp/od,append=false' \
 T_PREFIX='/tmp/od,inary' \
   run 'plain comma in the path still aggregates' shared \
   '/tmp/od,inary/target/jacoco-aggregate.exec'
+
+# The build expands a fixed list of workspace variables before Maven
+# reads them, so the resolver has to read the same values. Reading the
+# literal text would class this as relative and drop the report pass.
+# Single quotes on purpose: the literal text is what a caller writes
+# and what the resolver has to expand for itself.
+# shellcheck disable=SC2016
+GITHUB_WORKSPACE=/ws \
+  T_PARAMS='-Djacoco.dataFile=${GITHUB_WORKSPACE}/target/j.exec' \
+  run 'workspace variable in a caller path expands' project \
+  '/ws/target/j.exec'
+# shellcheck disable=SC2016
+GITHUB_WORKSPACE=/ws \
+  T_PARAMS='-Djacoco.dataFile=$GITHUB_WORKSPACE/target/j.exec' \
+  run 'bare workspace variable expands too' project '/ws/target/j.exec'
+
+# Each POM property is matched against the caller argument of the same
+# name. A caller naming the output mode says nothing about whether the
+# project appends, so it must not lift a jacoco.append the POM set.
+T_EPOM="$(epom '' '' '' '    <jacoco.append>false</jacoco.append>')" \
+  T_PARAMS='-Djacoco.output=file' \
+  run 'POM append=false survives an unrelated caller -D' project ''
+T_EPOM="$(epom '' '' '' '    <jacoco.append>false</jacoco.append>')" \
+  T_PARAMS='-Djacoco.append=true' \
+  run 'a caller -Djacoco.append=true lifts the property' shared '*'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

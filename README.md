@@ -98,6 +98,10 @@ interpolation, which leaves a user property a plugin reads directly, such
 as `-Djacoco.dataFile`, holding the literal text. Expanding these names
 first gives a caller the behaviour Jenkins had.
 
+The build, the JaCoCo mode resolution below and the aggregate report pass
+read the same expanded arguments, so a path written this way decides the
+coverage layout as the same absolute path everywhere.
+
 Every other `${...}` reaches Maven as written, so Maven's own
 `${project.*}` and `${settings.*}` still resolve. A name outside the list
 stays literal even where the environment holds a value for it, which

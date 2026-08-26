@@ -250,6 +250,17 @@ runs:
         # overrides both. The extraction below takes the last value
         # written, so scan them in that order and the value picked here
         # is the value Maven uses.
+        # The build expands a fixed list of workspace variables in
+        # these two strings before Maven sees them, so read the values
+        # Maven receives rather than the literal text. A caller writing
+        # -Djacoco.destFile=${GITHUB_WORKSPACE}/target/jacoco.exec
+        # otherwise reads here as a relative path and the mode resolved
+        # would not match the build.
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
+        MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
+        MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
+
         ALL_ARGS="$CONFIG_ARGS ${MAVEN_ARGS:-} $MVN_OPTS $MVN_PARAMS"
 
         # Maven honours the last value written for a property, so read
@@ -435,7 +446,8 @@ runs:
         # it. pluginManagement declares versions without running
         # anything and is dropped.
         EPOM_FACTS='agent=unknown owns=no eskip= pskip= eappend='
-        EPOM_FACTS="$EPOM_FACTS eoutput= edump= pdest= pdata= pnoappend="
+        EPOM_FACTS="$EPOM_FACTS eoutput= edump= pdest= pdata="
+        EPOM_FACTS="$EPOM_FACTS propappend= propoutput= propdump="
         CLI_SKIP="$(lc "$(last_arg_value 'jacoco.skip')")"
         if [ -s "$EPOM_FILE" ]; then
           EPOM_FACTS="$(awk -v cliskip="$CLI_SKIP" '
@@ -549,11 +561,11 @@ runs:
             /<jacoco\.skip>/ { pomskip = boolof($0) }
             /<jacoco\.destFile[ \/>]/ { pdest = 1 }
             /<jacoco\.dataFile[ \/>]/ { pdata = 1 }
-            /<jacoco\.append>[[:space:]]*[Ff]/ { pnoappend = 1 }
+            /<jacoco\.append>[[:space:]]*[Ff]/ { qappend = 1 }
             /<jacoco\.output>[[:space:]]*(tcpserver|tcpclient|none)/ {
-              pnoappend = 1
+              qoutput = 1
             }
-            /<jacoco\.dumpOnExit>[[:space:]]*[Ff]/ { pnoappend = 1 }
+            /<jacoco\.dumpOnExit>[[:space:]]*[Ff]/ { qdump = 1 }
             /<pluginManagement>/ { pm = 1 }
             /<\/pluginManagement>/ { pm = 0; next }
             pm { next }
@@ -576,9 +588,11 @@ runs:
               if (nlive < 1 || ndump < nlive) { fdump = "" }
               printf " eskip=%s pskip=%s eappend=%s eoutput=%s", \
                 fskip, fpskip, fappend, foutput
-              printf " edump=%s pdest=%s pdata=%s pnoappend=%s\n", \
-                fdump, (pdest ? "yes" : ""), (pdata ? "yes" : ""), \
-                (pnoappend ? "yes" : "")
+              printf " edump=%s pdest=%s pdata=%s", \
+                fdump, (pdest ? "yes" : ""), (pdata ? "yes" : "")
+              printf " propappend=%s propoutput=%s propdump=%s\n", \
+                (qappend ? "yes" : ""), (qoutput ? "yes" : ""), \
+                (qdump ? "yes" : "")
             }
           ' "$EPOM_FILE")"
         fi
@@ -720,16 +734,21 @@ runs:
             if [ -z "$CALLER_DATA" ] && [ "$(fact pdata)" = 'yes' ]; then
               POM_DATA='yes'
             fi
-            # Without appending each subproject overwrites the last, and
-            # the shared file ends up holding whichever ran last. A
-            # caller who set the property by name has already overridden
-            # this one, so read it only when they did not.
+            # Without appending each subproject overwrites the last,
+            # and the shared file ends up holding whichever ran last.
             # The agent's output mode and its exit dump go the same
             # way: either one can leave the injected file unwritten.
-            # One fact covers all three, since the outcome is the same.
+            # A caller who set one of these by name has overridden that
+            # property, so read each one only where they did not. They
+            # are matched name for name: a caller naming the output mode
+            # says nothing about whether the project appends.
             POM_NOAPPEND=''
-            if [ "$(fact pnoappend)" = 'yes' ] \
-              && [ -z "$APPEND_ARG$OUTPUT_ARG$DUMP_ARG" ]; then
+            if { [ "$(fact propappend)" = 'yes' ] \
+              && [ -z "$APPEND_ARG" ]; } \
+              || { [ "$(fact propoutput)" = 'yes' ] \
+                && [ -z "$OUTPUT_ARG" ]; } \
+              || { [ "$(fact propdump)" = 'yes' ] && [ -z "$DUMP_ARG" ]; }
+            then
               POM_NOAPPEND='yes'
             fi
             if [ -n "$POM_DEST" ] || [ -n "$POM_DATA" ] \
@@ -942,56 +961,6 @@ runs:
         fi
 
         # Expand ${VAR} references in the caller's Maven arguments.
-        #
-        # Maven interpolates ${...} only in a value reaching it through
-        # POM interpolation. A user property a plugin reads directly,
-        # -Djacoco.dataFile or -Dsonar.* among them, keeps the literal
-        # text, and the shell does not help either: it word-splits
-        # $MVN_PARAMS below but never re-expands ${...} inside the
-        # value. Jenkins expanded these before Maven started, so a
-        # caller writing an absolute workspace path reasonably expects
-        # the same.
-        #
-        # Expand a fixed list of workspace variables. Bash string
-        # operations rather than eval or a subprocess: nothing here
-        # executes, so $(...), backticks and $((...)) stay inert, and
-        # the step gains no dependency beyond the shell it already runs
-        # in. The name list is explicit because this step's environment
-        # holds GITHUB_TOKEN and whatever env-secrets the caller
-        # injected above; anything outside the list, including Maven's
-        # own ${project.*} and ${settings.*}, passes through for Maven
-        # to resolve.
-        expand_workspace_vars() {
-          local text="$1" out='' head rest raw name value
-          local allow=' GITHUB_WORKSPACE GITHUB_REPOSITORY GITHUB_REF_NAME'
-          allow="$allow GITHUB_SHA GITHUB_RUN_ID RUNNER_TEMP RUNNER_OS "
-          while [ "${text#*'$'}" != "$text" ]; do
-            head="${text%%'$'*}"
-            rest="${text:${#head}+1}"
-            if [[ "$rest" =~ ^\{[A-Za-z_][A-Za-z0-9_]*\} ]]; then
-              raw="$BASH_REMATCH"
-              name="${raw:1:${#raw}-2}"
-            elif [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]* ]]; then
-              raw="$BASH_REMATCH"
-              name="$raw"
-            else
-              # A '$' introducing anything else -- '(', a backtick, a
-              # digit -- keeps its literal text and its meaning here,
-              # which is none.
-              out="$out$head\$"
-              text="$rest"
-              continue
-            fi
-            if [ "${allow#* "$name" }" != "$allow" ]; then
-              value="${!name-}"
-            else
-              value="\$$raw"
-            fi
-            out="$out$head$value"
-            text="${rest:${#raw}}"
-          done
-          printf '%s' "$out$text"
-        }
         # mvn-params and mvn-opts are whitespace-separated argument
         # strings, so a value carrying a space becomes two arguments
         # wherever it lands. That holds for the literal text as much as
@@ -1013,6 +982,8 @@ runs:
           esac
         done
 
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
         MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
         MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
 
@@ -1189,6 +1160,13 @@ runs:
         if [ -n "$MARKER_FILE" ]; then
           touch "$MARKER_FILE"
         fi
+
+        # The same expansion the build applies, so this pass reads the
+        # arguments Maven received there rather than literal text.
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
+        MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
+        MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
 
         # shellcheck disable=SC2086
         mvn --batch-mode --no-transfer-progress \

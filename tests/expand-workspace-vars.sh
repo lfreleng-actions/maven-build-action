@@ -9,8 +9,8 @@
 # change that swapped the allowlist for a blanket expansion, would place
 # a credential on a command line.
 #
-# The function comes out of action.yaml rather than living here twice,
-# so this checks what the action runs.
+# The function comes from the file the action sources, rather than
+# living here twice, so this checks what the action runs.
 
 # Single quotes throughout the cases below: the point is to hand the
 # function the literal text a caller writes, and let it do the
@@ -21,20 +21,13 @@ set -euo pipefail
 
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ACTION="${SCRIPT_DIR}/../action.yaml"
-FN="$(mktemp)"
-trap 'rm -f "$FN"' EXIT
+# shellcheck source=../expand-workspace-vars.sh disable=SC1091
+. "${SCRIPT_DIR}/../expand-workspace-vars.sh"
 
-awk '/^        expand_workspace_vars\(\) \{/{f=1}
-     f{print}
-     f&&/^        \}$/{exit}' "$ACTION" | sed 's/^        //' > "$FN"
-
-if ! grep -q 'expand_workspace_vars' "$FN"; then
-  echo "Could not find expand_workspace_vars in ${ACTION}" >&2
+if ! declare -F expand_workspace_vars >/dev/null; then
+  echo "expand-workspace-vars.sh defines no expand_workspace_vars" >&2
   exit 1
 fi
-# shellcheck source=/dev/null
-. "$FN"
 
 export GITHUB_WORKSPACE=/home/runner/work/p/p
 export GITHUB_REPOSITORY=org/proj
