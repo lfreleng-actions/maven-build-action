@@ -337,6 +337,48 @@ jobs:
           ./tests/check-subproject-coverage.sh \
             tests/fixtures/multi-subproject expect-none
 
+      # A build that runs no test writes no execution data, so the
+      # report pass has nothing to hand the badge. The badge step falls
+      # back to the conventional root CSV, which a reused workspace
+      # still holds from an earlier run, so it has to stay skipped
+      # rather than badge the stale figure planted here.
+      - name: "Plant a stale root coverage report"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/site/jacoco
+          {
+            printf '%s' "GROUP,PACKAGE,CLASS,INSTRUCTION_MISSED,"
+            printf '%s' "INSTRUCTION_COVERED,BRANCH_MISSED,"
+            printf '%s' "BRANCH_COVERED,LINE_MISSED,LINE_COVERED,"
+            printf '%s' "COMPLEXITY_MISSED,COMPLEXITY_COVERED,"
+            printf '%s\n' "METHOD_MISSED,METHOD_COVERED"
+            echo "stale,fixture,Old,0,100,0,10,0,20,0,5,0,5"
+          } > target/site/jacoco/jacoco.csv
+
+      - name: "Build the fixture reactor without running tests"
+        id: no-tests
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          mvn-params: "-DskipTests"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check a build with no tests badged nothing"
+        shell: bash
+        env:
+          COVERAGE: ${{ steps.no-tests.outputs.coverage }}
+        run: |
+          set -euo pipefail
+          rm -rf target/site/jacoco
+          if [ -n "$COVERAGE" ]; then
+            echo "Coverage came from the stale report: $COVERAGE" >&2
+            exit 1
+          fi
+          echo "No coverage reported, as expected"
+
       # jacoco-mode off leaves the build exactly as it was.
       - name: "Build the fixture reactor with aggregation off"
         uses: ./

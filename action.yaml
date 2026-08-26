@@ -1249,8 +1249,14 @@ runs:
 
     - name: 'Generate JaCoCo Badge'
       id: jacoco
-      # skip during local testing
-      if: ${{ !env.ACT && inputs.run-jacoco == 'true' }}
+      # Skipped during local testing, and skipped where an aggregate
+      # report was scheduled and wrote no CSV. The fallback path below
+      # names the conventional root report, which a workspace reused
+      # without a clean still holds from an earlier run; badging that
+      # would hand on the stale figure the report step refused. A build
+      # with no aggregate scheduled keeps the fallback it always had.
+      # yamllint disable-line rule:line-length
+      if: ${{ !env.ACT && inputs.run-jacoco == 'true' && (steps.jacoco-mode.outputs.data_file == '' || steps.jacoco-report.outputs.coverage_csv_paths != '') }}
       # yamllint disable-line rule:line-length
       uses: cicirello/jacoco-badge-generator@72266185b7ee48a6fd74eaf0238395cc8b14fef8 # v2.12.1
       with:

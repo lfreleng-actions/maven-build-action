@@ -340,6 +340,12 @@ all — `-DskipTests`, say — writes no execution data by design, and passes wi
 note. Surefire and Failsafe report directories both count as evidence that tests
 ran.
 
+The coverage badge follows the same rule. Where this action schedules an
+aggregate report and that report writes no CSV, badge generation stays
+skipped rather than falling back to the conventional root report, which a
+workspace reused without a `clean` still holds from an earlier run. A build
+with no aggregate scheduled keeps the fallback it always had.
+
 ## Implementation Details
 
 This action performs the following steps:
