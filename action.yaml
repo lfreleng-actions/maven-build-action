@@ -71,6 +71,11 @@ inputs:
     description: 'Boolean defining whether JaCoCo should be run'
     required: false
     default: 'true'
+  jacoco-mode:
+    # yamllint disable-line rule:line-length
+    description: "How to gather JaCoCo coverage across Maven subprojects: auto, shared, project or off"
+    required: false
+    default: 'auto'
   artifact-upload:
     description: 'Upload the JaCoCo badges directory as a build artifact'
     required: false
@@ -102,6 +107,14 @@ outputs:
     # yamllint disable-line rule:line-length
     description: 'Name of the uploaded JaCoCo badges artifact (empty when artifact upload is disabled)'
     value: ${{ steps.summary.outputs.artifact_name }}
+  coverage_report_paths:
+    # yamllint disable-line rule:line-length
+    description: 'Value for sonar.coverage.jacoco.xmlReportPaths covering every subproject (empty when the aggregate report did not run)'
+    value: ${{ steps.jacoco-report.outputs.coverage_report_paths }}
+  jacoco_data_file:
+    # yamllint disable-line rule:line-length
+    description: 'Path of the JaCoCo execution data every subproject reported against (empty when each subproject kept its own)'
+    value: ${{ steps.jacoco-mode.outputs.data_file }}
 
 runs:
   using: 'composite'
@@ -146,7 +159,750 @@ runs:
       with:
         secrets: ${{ inputs.env-secrets }}
 
+    - name: 'Resolve JaCoCo coverage mode'
+      id: jacoco-mode
+      shell: bash
+      env:
+        PATH_PREFIX: ${{ inputs.path_prefix }}
+        MVN_POM_FILE: ${{ inputs.mvn-pom-file }}
+        MVN_PROFILES: ${{ inputs.mvn-profiles }}
+        MVN_OPTS: ${{ inputs.mvn-opts }}
+        MVN_PARAMS: ${{ inputs.mvn-params }}
+        JACOCO_MODE: ${{ inputs.jacoco-mode }}
+        RUN_JACOCO: ${{ inputs.run-jacoco }}
+        GLOBAL_SETTINGS: ${{ inputs.global-settings }}
+      run: |
+        # Decide where the subprojects write their coverage data
+        set -euo pipefail
+
+        # A Maven build with subprojects runs the JaCoCo agent once per
+        # subproject, and each writes its own execution data. A report
+        # built from one of those files carries the lines that
+        # subproject's own tests reached and drops the lines another
+        # subproject's tests reached, which reads downstream as missing
+        # coverage.
+        #
+        # Point every subproject at one execution file and the picture
+        # covers the whole reactor. The agent appends by default, so the
+        # subprojects accumulate into it in reactor order.
+
+        case "$JACOCO_MODE" in
+          auto | shared | project | off) ;;
+          *)
+            echo "Error: jacoco-mode must be one of:" >&2
+            echo "auto, shared, project, off ❌" >&2
+            echo "Received: '$JACOCO_MODE'" >&2
+            exit 1
+            ;;
+        esac
+
+        {
+          echo "mode=off"
+          echo "data_file="
+          echo "build_args="
+          echo "marker_file="
+        } > "$GITHUB_OUTPUT"
+
+        if [ "$JACOCO_MODE" = 'off' ] || [ "$RUN_JACOCO" != 'true' ]; then
+          echo "JaCoCo aggregation disabled"
+          exit 0
+        fi
+
+        # Every place a flag can reach this build. A -T in a checked-in
+        # .mvn/maven.config or in MAVEN_ARGS applies to the build below
+        # as surely as one written into mvn-params.
+        #
+        # Maven starts at the directory of the POM named by -f and walks
+        # upward to the first .mvn it finds, so a config at the root of a
+        # checkout applies to a POM well below it. Verified against Maven
+        # 3.9.9: a property set in repo/.mvn/maven.config resolves when
+        # building repo/sub/pom.xml. Mirror that walk rather than
+        # checking two fixed locations.
+        POM_DIR="$(dirname -- "$PATH_PREFIX/$MVN_POM_FILE")"
+        CONFIG_FILE=''
+        SEARCH_DIR="$POM_DIR"
+        while true; do
+          if [ -f "$SEARCH_DIR/.mvn/maven.config" ]; then
+            CONFIG_FILE="$SEARCH_DIR/.mvn/maven.config"
+            break
+          fi
+          PARENT_DIR="$(dirname -- "$SEARCH_DIR")"
+          if [ "$PARENT_DIR" = "$SEARCH_DIR" ]; then
+            break
+          fi
+          SEARCH_DIR="$PARENT_DIR"
+        done
+        CONFIG_ARGS=''
+        if [ -n "$CONFIG_FILE" ]; then
+          # Maven skips lines starting with #, so scanning their text
+          # would let a comment such as "# -T disabled here" disable
+          # aggregation on a build that runs sequentially. Verified
+          # against Maven 3.9.9: a config holding only a commented flag
+          # parses cleanly.
+          # sed rather than grep: grep exits non-zero when it filters
+          # every line away, and an all-comment config is a normal
+          # thing to have. Under set -e that exit status kills the step.
+          CONFIG_ARGS="$(sed '/^[[:space:]]*#/d' "$CONFIG_FILE" \
+            | tr '\n' ' ')"
+        fi
+        # Verified against Maven 3.9.9: .mvn/maven.config is weakest,
+        # MAVEN_ARGS overrides it, and an explicit command line argument
+        # overrides both. The extraction below takes the last value
+        # written, so scan them in that order and the value picked here
+        # is the value Maven uses.
+        # The build expands a fixed list of workspace variables in
+        # these two strings before Maven sees them, so read the values
+        # Maven receives rather than the literal text. A caller writing
+        # -Djacoco.destFile=${GITHUB_WORKSPACE}/target/jacoco.exec
+        # otherwise reads here as a relative path and the mode resolved
+        # would not match the build.
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
+        MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
+        MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
+
+        ALL_ARGS="$CONFIG_ARGS ${MAVEN_ARGS:-} $MVN_OPTS $MVN_PARAMS"
+
+        # Maven honours the last value written for a property, so read
+        # that rather than matching anywhere in the string. ALL_ARGS is
+        # built in the order Maven applies its sources, and the flag
+        # spellings -Dname=value, -D name=value, --define name=value and
+        # --define=name=value all end up matched on the property name.
+        # A bare -Dname carries no value and Maven reads it as true.
+        # Verified against Maven 3.9.9: -Djacoco.skip and --define
+        # jacoco.skip both evaluate to true. Matching name= alone would
+        # miss the shorthand and leave the resolver sharing a file the
+        # skipped agent never writes.
+        last_arg_value() {
+          awk -v want="$1" '
+            function record(tok,   eq, n, v) {
+              eq = index(tok, "=")
+              if (eq) {
+                n = substr(tok, 1, eq - 1); v = substr(tok, eq + 1)
+              } else {
+                n = tok; v = "true"
+              }
+              if (n == want) { value = v; seen = 1 }
+            }
+            {
+              for (i = 1; i <= NF; i++) {
+                if (pending) { record($i); pending = 0; continue }
+                if ($i == "-D" || $i == "--define") { pending = 1; continue }
+                if (substr($i, 1, 2) == "-D") {
+                  record(substr($i, 3)); continue
+                }
+                if (substr($i, 1, 9) == "--define=") {
+                  record(substr($i, 10))
+                }
+              }
+            }
+            END { if (seen) { print value } }
+          ' <<< "$ALL_ARGS"
+        }
+
+        # Maven converts a boolean parameter case-insensitively.
+        # Verified against Maven 3.9.9: -DforceStdout=TRUE prints and
+        # -DforceStdout=FALSE does not, so FALSE really does turn a
+        # parameter off. Compare the folded value, never the raw one.
+        lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+        # Stepping aside reads the same way wherever the reason comes
+        # from: auto is guessing, so it leaves the build alone, while an
+        # explicit shared is the caller saying they know their build and
+        # earns a warning instead.
+        step_aside() {
+          if [ "$JACOCO_MODE" = 'auto' ]; then
+            echo "::notice::$1; leaving JaCoCo coverage per subproject"
+            exit 0
+          fi
+          if [ "$JACOCO_MODE" = 'shared' ]; then
+            echo "::warning::$1 alongside jacoco-mode: shared; $2"
+          fi
+        }
+
+        # A parallel reactor runs several agents against one file at
+        # once. Injecting a shared file there produces a corrupt one, so
+        # step aside. An explicit shared stands: the caller asked. The
+        # step aside belongs to auto, which is guessing.
+        case " $ALL_ARGS " in
+          *' -T'* | *' --threads'*)
+            step_aside 'Parallel build requested' \
+              "agents may overwrite each other's records"
+            ;;
+        esac
+
+        # The last value written is the one Maven honours, so read that
+        # rather than matching anywhere in the string. A MAVEN_ARGS
+        # setting of false that mvn-params turns back to true runs with
+        # appending on, and matching the earlier value would step aside
+        # from a build that shares perfectly well.
+        APPEND_ARG="$(lc "$(last_arg_value 'jacoco.append')")"
+        OUTPUT_ARG="$(lc "$(last_arg_value 'jacoco.output')")"
+        DUMP_ARG="$(lc "$(last_arg_value 'jacoco.dumpOnExit')")"
+
+        # Maven accepts -Dname=value, -D name=value, --define name=value
+        # and --define=name=value, so match the property name rather
+        # than the flag.
+        CALLER_FILE=''
+        # Straight to the parser rather than through a substring gate:
+        # a bare -Djacoco.destFile carries no '=' and Maven reads it as
+        # true, so a gate requiring '=' misses it, auto injects shared,
+        # and the caller's own argument then sends every agent to a
+        # relative file named 'true'.
+        #
+        # The report pass needs the value, not just its presence.
+        # jacoco:report reads jacoco.dataFile, so prefer that.
+        #
+        # The two names are tracked apart because they drive different
+        # goals: the agent writes jacoco.destFile, the report reads
+        # jacoco.dataFile. A caller who passes one of them says nothing
+        # about the other, and Maven's -D only outranks a POM property
+        # of the same name.
+        CALLER_DEST="$(last_arg_value 'jacoco.destFile')"
+        CALLER_DATA="$(last_arg_value 'jacoco.dataFile')"
+        CALLER_FILE="$CALLER_DATA"
+        if [ -z "$CALLER_FILE" ]; then
+          CALLER_FILE="$CALLER_DEST"
+        fi
+
+        # The project may set the property in its POM, where an argument
+        # scan cannot see it, and where -D would override it and move
+        # every subproject's output. Ask Maven what the project resolved.
+        PROFILES_ARG=''
+        if [ -n "$MVN_PROFILES" ]; then
+          PROFILES_ARG="-P $MVN_PROFILES"
+        fi
+
+        # global-settings carries the settings document itself, not a
+        # path, so materialise it the same way the build step does:
+        # under RUNNER_TEMP rather than the workspace, at an
+        # unpredictable name mktemp creates at 0600, removed on the way
+        # out. A settings document commonly carries credentials, and
+        # mvn here runs repository-controlled code as this user.
+        # Bash keeps one EXIT trap, so a later trap replaces this rather
+        # than adding to it. Both temporary files are named here and
+        # removed together; a settings document carries credentials, and
+        # leaving it behind hands it to everything else in the job.
+        GLOBAL_SETTINGS_FILE=''
+        EPOM_FILE=''
+        trap 'rm -f "$GLOBAL_SETTINGS_FILE" "$EPOM_FILE"' EXIT
+
+        GLOBAL_SETTINGS_ARG=''
+        if [ -n "$GLOBAL_SETTINGS" ]; then
+          SETTINGS_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          GLOBAL_SETTINGS_FILE="$(
+            mktemp "${SETTINGS_DIR}/maven-global-settings.XXXXXXXXXX"
+          )"
+          printf '%s' "$GLOBAL_SETTINGS" > "$GLOBAL_SETTINGS_FILE"
+          GLOBAL_SETTINGS_ARG="--global-settings $GLOBAL_SETTINGS_FILE"
+        fi
+
+        # The same arguments the build runs with. A -D in mvn-params can
+        # activate a profile that configures JaCoCo, and a probe blind to
+        # it reads a different project than the one that gets built.
+        PROBE_ARGS="$PROFILES_ARG $GLOBAL_SETTINGS_ARG $MVN_OPTS $MVN_PARAMS"
+
+        # Read the effective POM once, up front. Two questions depend on
+        # it: whether a JaCoCo agent runs at all, and whether the project
+        # configures the plugin directly.
+        #
+        # -Doutput rather than reading stdout. help:effective-pom writes
+        # its XML through the plugin logger at INFO, so -q discards it
+        # and the command substitution comes back empty on a perfectly
+        # successful run. Verified against Maven 3.9.9: stdout under -q
+        # is 0 bytes, while -Doutput writes the document regardless.
+        EPOM_FILE="$(mktemp)"
+        # shellcheck disable=SC2086
+        mvn --batch-mode --no-transfer-progress -q \
+          -f "$PATH_PREFIX/$MVN_POM_FILE" $PROBE_ARGS \
+          help:effective-pom -Doutput="$EPOM_FILE" >/dev/null 2>&1 \
+          || : > "$EPOM_FILE"
+
+        # No JaCoCo agent means no execution data exists to share and
+        # nothing downstream to fix. Aggregating here would leave the
+        # report step failing an ordinary tested project that never asked
+        # for coverage. jacoco-mode places execution data; it does not
+        # switch coverage on.
+        #
+        # The presence of the artifact proves nothing. A parent that
+        # declares JaCoCo in pluginManagement, or a project binding only
+        # the report goal, carries the artifact in its effective POM
+        # while no agent ever attaches. So look for a live prepare-agent
+        # binding outside pluginManagement, and honour a skip.
+        # One pass over the effective POM answers both questions this
+        # step turns on: whether an agent runs, and whether the project
+        # places the execution data itself.
+        #
+        # Maven scopes plugin configuration, so this does too. An
+        # execution's configuration applies to that execution alone and
+        # merges over the plugin-level default, which means a separate
+        # report execution naming a dataFile says nothing about where
+        # prepare-agent writes, and an execution's <skip>false</skip>
+        # overrides a plugin-level <skip>true</skip>. Reading either as
+        # plugin-wide loses the aggregation this setting promises.
+        #
+        # The report pass runs from the command line, so only
+        # plugin-level configuration and a default-cli execution reach
+        # it. pluginManagement declares versions without running
+        # anything and is dropped.
+        EPOM_FACTS='agent=unknown owns=no eskip= pskip= eappend='
+        EPOM_FACTS="$EPOM_FACTS eoutput= edump= pdest= pdata="
+        EPOM_FACTS="$EPOM_FACTS propappend= propoutput= propdump="
+        CLI_SKIP="$(lc "$(last_arg_value 'jacoco.skip')")"
+        if [ -s "$EPOM_FILE" ]; then
+          EPOM_FACTS="$(awk -v cliskip="$CLI_SKIP" '
+            function boolof(l,   t) {
+              t = l
+              sub(/^[^>]*>/, "", t); sub(/<.*$/, "", t)
+              return tolower(t)
+            }
+            function textof(l,   t) {
+              t = l
+              sub(/^[^>]*>/, "", t); sub(/<.*$/, "", t)
+              return t
+            }
+            function analyse(   i, l, inexs, ex, goals, eskip, ea, er,
+                                id, pskip, s, pappend, poutput, pdump,
+                                eappend, eoutput, edump, m) {
+              pskip = ""; pappend = ""; poutput = ""; pdump = ""
+              for (i = 1; i <= n; i++) {
+                l = buf[i]
+                if (l ~ /<executions>/) { inexs = 1 }
+                if (l ~ /<\/executions>/) { inexs = 0 }
+                if (inexs) { continue }
+                if (l ~ /<skip>/) { pskip = boolof(l) }
+                if (l ~ /<(destFile|dataFile)[ \/>]/) { owns = 1 }
+                # Plugin-level defaults, not verdicts. Maven merges an
+                # execution over these, so a live execution turning
+                # appending back on, or the output back to a file, is
+                # safe to aggregate. Settled per execution below.
+                if (l ~ /<append>/) { pappend = boolof(l) }
+                if (l ~ /<output>/) { poutput = boolof(l) }
+                if (l ~ /<dumpOnExit>/) { pdump = boolof(l) }
+              }
+              # The report this action runs from the command line
+              # lands in a default-cli execution, which inherits the
+              # plugin-level configuration and nothing else. A skip
+              # written there silences that report whatever the
+              # executions say.
+              if (pskip != "") { fpskip = pskip }
+              inexs = 0; ex = 0
+              for (i = 1; i <= n; i++) {
+                l = buf[i]
+                if (l ~ /<executions>/) { inexs = 1; continue }
+                if (l ~ /<\/executions>/) { inexs = 0; continue }
+                if (!inexs) { continue }
+                if (l ~ /<execution>/) {
+                  ex = 1; goals = ""; eskip = ""
+              ea = 0; er = 0; id = ""
+                  eappend = ""; eoutput = ""; edump = ""; continue
+                }
+                if (l ~ /<\/execution>/) {
+                  if (goals ~ /prepare-agent/) {
+                    # An element beats a -D, a -D beats a property,
+                    # and the property belongs to this project alone. A
+                    # sibling that skips its agent says nothing about
+                    # this one.
+                    s = (eskip != "") ? eskip : pskip
+                    if (s == "") { s = (cliskip != "") ? cliskip : pomskip }
+                    if (s != "true") {
+                      agent = 1
+                      # A skipped execution runs nothing, so where it
+                      # would have written says nothing about the
+                      # layout. Another execution may well be active
+                      # and using the default one.
+                      if (ea) { owns = 1 }
+                      # Each of these merges over the plugin default the
+                      # same way skip does, so settle them here rather
+                      # than on the plugin value alone.
+                      m = (eappend != "") ? eappend : pappend
+                      if (m != "") { fappend = m; nappend++ }
+                      if (m == "false") { owns = 1 }
+                      m = (eoutput != "") ? eoutput : poutput
+                      if (m != "") { foutput = m; noutput++ }
+                      if (m != "" && m != "file") { owns = 1 }
+                      m = (edump != "") ? edump : pdump
+                      if (m != "") { fdump = m; ndump++ }
+                      if (m == "false") { owns = 1 }
+                      if (s != "") { fskip = s }
+                      nlive++
+                    }
+                  }
+                  if (id == "default-cli" && er) { owns = 1 }
+                  ex = 0; continue
+                }
+                if (!ex) { continue }
+                if (l ~ /<id>/) { id = textof(l) }
+                if (l ~ /<goal>/) { goals = goals textof(l) " " }
+                if (l ~ /<skip>/) { eskip = boolof(l) }
+                if (l ~ /<destFile[ \/>]/) { ea = 1 }
+                if (l ~ /<append>/) { eappend = boolof(l) }
+                if (l ~ /<output>/) { eoutput = boolof(l) }
+                if (l ~ /<dumpOnExit>/) { edump = boolof(l) }
+                if (l ~ /<dataFile[ \/>]/) { er = 1 }
+              }
+            }
+            # help:effective-pom lists every profile, activated or
+            # not, with its plugin declarations intact. Verified against
+            # Maven 3.9.9: an inactive profile appears in full, and an
+            # active one appears both here and merged into the build
+            # above. Reading this section would settle the layout from
+            # configuration that never runs, so skip it and read the
+            # merged build alone.
+            /<profiles>/ { prof = 1 }
+            /<\/profiles>/ { prof = 0; next }
+            prof { next }
+            # Properties, read here rather than by a grep over the
+            # file, so that a profile which never activated has no say
+            # in a build it took no part in. help:effective-pom writes
+            # the properties of each project above its build, so a scan
+            # reaching an execution has read them already.
+            /<project[ >]/ { pomskip = "" }
+            /<jacoco\.skip>/ { pomskip = boolof($0) }
+            /<jacoco\.destFile[ \/>]/ { pdest = 1 }
+            /<jacoco\.dataFile[ \/>]/ { pdata = 1 }
+            /<jacoco\.append>[[:space:]]*[Ff]/ { qappend = 1 }
+            /<jacoco\.output>[[:space:]]*(tcpserver|tcpclient|none)/ {
+              qoutput = 1
+            }
+            /<jacoco\.dumpOnExit>[[:space:]]*[Ff]/ { qdump = 1 }
+            /<pluginManagement>/ { pm = 1 }
+            /<\/pluginManagement>/ { pm = 0; next }
+            pm { next }
+            /<\/plugin>/ { if (inp && jac) { analyse() } inp = 0; next }
+            /<plugin>/ { inp = 1; n = 0; jac = 0; next }
+            inp {
+              buf[++n] = $0
+              if ($0 ~ /jacoco-maven-plugin/) { jac = 1 }
+            }
+            END {
+              printf "agent=%s owns=%s", (agent ? "yes" : "no"), \
+                (owns ? "yes" : "no")
+              # A configured value stands in for a caller -D where
+              # every live agent carries it. One execution left on the
+              # default still follows that -D, and reporting the
+              # configured value there would hide an agent overwriting
+              # the shared file.
+              if (nlive < 1 || nappend < nlive) { fappend = "" }
+              if (nlive < 1 || noutput < nlive) { foutput = "" }
+              if (nlive < 1 || ndump < nlive) { fdump = "" }
+              printf " eskip=%s pskip=%s eappend=%s eoutput=%s", \
+                fskip, fpskip, fappend, foutput
+              printf " edump=%s pdest=%s pdata=%s", \
+                fdump, (pdest ? "yes" : ""), (pdata ? "yes" : "")
+              printf " propappend=%s propoutput=%s propdump=%s\n", \
+                (qappend ? "yes" : ""), (qoutput ? "yes" : ""), \
+                (qdump ? "yes" : "")
+            }
+          ' "$EPOM_FILE")"
+        fi
+
+        # One field out of the parser's single line of facts.
+        fact() { s="${EPOM_FACTS#*"$1"=}"; printf '%s' "${s%% *}"; }
+
+        AGENT_BOUND='no'
+        case "$EPOM_FACTS" in
+          *'agent=unknown'*)
+            # The probe failed. Say nothing rather than the wrong thing.
+            AGENT_BOUND='unknown'
+            ;;
+          *'agent=yes'*) AGENT_BOUND='yes' ;;
+        esac
+
+        # The skip is settled per project in the parser above, where an
+        # element beats a -D, a -D beats a property, and a property
+        # belongs to the project that declares it. Where Maven never
+        # answered there is no project to read, so the caller's own -D
+        # is all there is to go on.
+        if [ "$AGENT_BOUND" = 'unknown' ] && [ "$CLI_SKIP" = 'true' ]; then
+          AGENT_BOUND='no'
+        fi
+
+        # An explicit configuration element beats a -D, so these wait
+        # until the effective POM has been read. A caller passing
+        # -Djacoco.append=false against a plugin that configures
+        # <append>true</append> gets Maven's answer, which appends, and
+        # a build that shares perfectly well keeps its aggregation.
+        #
+        # The shared file works because every agent appends to it. A
+        # caller who turns appending off leaves each subproject
+        # overwriting the last, and the file ends up holding the
+        # subproject that ran last. Step aside rather than produce that.
+        if [ -z "$(fact eappend)" ]; then
+          case "$APPEND_ARG" in
+            'false')
+              step_aside 'jacoco.append=false requested' \
+                'each subproject will overwrite the last'
+              ;;
+          esac
+        fi
+
+        # The agent writes a file when output is 'file' and it dumps on
+        # exit. Under tcpserver, tcpclient or none it writes none at
+        # all, and with dumpOnExit false it writes nothing at JVM
+        # shutdown. Injecting a shared file there names one nothing
+        # writes, and the report pass then fails a build whose tests ran
+        # perfectly well.
+        if [ -z "$(fact eoutput)" ]; then
+          case "$OUTPUT_ARG" in
+            '' | 'file') ;;
+            *)
+              step_aside "jacoco.output=$OUTPUT_ARG writes no file" \
+                'the shared file will stay empty'
+              ;;
+          esac
+        fi
+        if [ -z "$(fact edump)" ]; then
+          case "$DUMP_ARG" in
+            'false')
+              step_aside 'jacoco.dumpOnExit=false requested' \
+                'the shared file will stay empty'
+              ;;
+          esac
+        fi
+
+        # A plugin-level skip element reaches the default-cli report
+        # this action runs after the reactor, even where an execution
+        # sets skip false and the agent duly writes its data. The report
+        # then prints "Skipping JaCoCo execution", exits zero, and
+        # writes no XML, which reaches Sonar as a coverage figure of
+        # zero. Verified against Maven 3.9.9 and JaCoCo 0.8.12: a
+        # plugin-level <skip>true</skip> skips jacoco:report on the
+        # command line, and -Djacoco.skip=false does not lift it,
+        # because an element beats a -D. Nothing on the command line
+        # rescues that, so step aside and say why.
+        if [ "$(fact pskip)" = 'true' ] && [ "$AGENT_BOUND" = 'yes' ]; then
+          step_aside 'The JaCoCo plugin configures skip, which the' \
+            'report pass inherits and would write no report'
+        fi
+
+        if [ "$AGENT_BOUND" = 'no' ]; then
+          echo "::notice::The project binds no JaCoCo agent, so there is" \
+            "no execution data to share"
+          exit 0
+        fi
+
+        # Who places the execution data. Read out of the effective POM
+        # rather than through help:evaluate: in a reactor help:evaluate
+        # answers for the top-level project alone, so a subproject that
+        # sets jacoco.destFile reads back as nobody setting it, and the
+        # injected -D then moves that subproject's agent output away
+        # from where its own build expects it. Verified against Maven
+        # 3.9.9: a property set in a child comes back as "null object or
+        # invalid expression" for the reactor, while help:effective-pom
+        # carries every project in the reactor.
+        #
+        # A configuration element and a property do not carry the same
+        # weight, so they are read separately. An element beats an
+        # injected -D outright, including one the caller passed. A
+        # property does not: -D wins over it.
+        PROJECT_FILE=''
+        if [ "$JACOCO_MODE" = 'auto' ]; then
+          if [ ! -s "$EPOM_FILE" ]; then
+            # Maven never answered. Treat that as the project owning the
+            # layout: injecting a -D against configuration that went
+            # unread is the one outcome that turns working coverage into
+            # none.
+            echo "::notice::Could not read the effective POM; leaving" \
+              "the JaCoCo layout to the project"
+            PROJECT_FILE='project'
+          elif [ "$(fact owns)" = 'yes' ]; then
+            # This beats the caller's -D too, so the caller's path names
+            # a file nothing writes. Scheduling the report pass against
+            # it would fail a build that produced perfectly good
+            # coverage somewhere else.
+            if [ -n "$CALLER_FILE" ]; then
+              echo "::notice::The POM configures the JaCoCo plugin" \
+                "directly, which beats the JaCoCo path passed in;" \
+                "leaving the layout to the project"
+              CALLER_FILE=''
+            else
+              echo "::notice::The POM configures the JaCoCo plugin" \
+                "directly; leaving the layout to the project"
+            fi
+            PROJECT_FILE='project'
+          else
+            # A property the caller did not override under the same
+            # name. -D only outranks a POM property Maven resolves by
+            # that name, so a caller who passed jacoco.dataFile leaves a
+            # POM jacoco.destFile in charge of where the agent writes.
+            POM_DEST=''
+            if [ -z "$CALLER_DEST" ] && [ "$(fact pdest)" = 'yes' ]; then
+              POM_DEST='yes'
+            fi
+            POM_DATA=''
+            if [ -z "$CALLER_DATA" ] && [ "$(fact pdata)" = 'yes' ]; then
+              POM_DATA='yes'
+            fi
+            # Without appending each subproject overwrites the last,
+            # and the shared file ends up holding whichever ran last.
+            # The agent's output mode and its exit dump go the same
+            # way: either one can leave the injected file unwritten.
+            # A caller who set one of these by name has overridden that
+            # property, so read each one only where they did not. They
+            # are matched name for name: a caller naming the output mode
+            # says nothing about whether the project appends.
+            POM_NOAPPEND=''
+            if { [ "$(fact propappend)" = 'yes' ] \
+              && [ -z "$APPEND_ARG" ]; } \
+              || { [ "$(fact propoutput)" = 'yes' ] \
+                && [ -z "$OUTPUT_ARG" ]; } \
+              || { [ "$(fact propdump)" = 'yes' ] && [ -z "$DUMP_ARG" ]; }
+            then
+              POM_NOAPPEND='yes'
+            fi
+            if [ -n "$POM_DEST" ] || [ -n "$POM_DATA" ] \
+              || [ -n "$POM_NOAPPEND" ]; then
+              # jacoco.destFile is the name the agent writes. When the
+              # project owns that and the caller named only a report
+              # path, the report path is a file nothing writes, and
+              # scheduling the pass against it fails a build whose
+              # coverage landed perfectly well elsewhere.
+              if [ -n "$POM_DEST" ] && [ -n "$CALLER_FILE" ]; then
+                echo "::notice::The POM places the JaCoCo execution" \
+                  "data and the JaCoCo path passed in does not name" \
+                  "it; leaving the layout to the project"
+                CALLER_FILE=''
+              else
+                echo "::notice::The POM places the JaCoCo execution" \
+                  "data; leaving the layout to the project"
+              fi
+              PROJECT_FILE='project'
+            fi
+          fi
+        fi
+
+        if [ "$JACOCO_MODE" = 'shared' ]; then
+          # An explicit shared is the caller deciding. Inferring from a
+          # path they also passed would override the mode they named.
+          CALLER_FILE=''
+          PROJECT_FILE=''
+        fi
+
+        if [ "$JACOCO_MODE" = 'project' ] \
+          || [ -n "$CALLER_FILE" ] || [ -n "$PROJECT_FILE" ]; then
+          # The caller or the project chose the layout. Honour it: an
+          # injected -D here would move the agent output away from the
+          # place the project's own merge step looks for it.
+          #
+          # Only an absolute caller-supplied path names one file for
+          # the whole reactor. Maven resolves a relative one against
+          # each subproject in turn, so it names as many files as there
+          # are subprojects, and the report pass cannot use it. A
+          # project-supplied path resolves per subproject as well, and
+          # the value read here belongs to the root.
+          case "$CALLER_FILE" in
+            /*) ;;
+            *)
+              if [ -n "$CALLER_FILE" ]; then
+                echo "::notice::Caller JaCoCo path '$CALLER_FILE' is" \
+                  "relative, so Maven resolves it per subproject;" \
+                  "leaving the report to the project"
+              fi
+              CALLER_FILE=''
+              ;;
+          esac
+          # A marker whenever the report pass is scheduled. Project mode
+          # still runs that pass for an absolute caller file, and without
+          # a marker the report step cannot tell that tests ran, so a
+          # missing data file reads as "no test ran" and passes. That is
+          # the same silent absence of coverage this setting exists to
+          # remove.
+          # The agents append by default, so a data file left by an
+          # earlier run in a reused workspace gains this run's records
+          # without losing the old ones. Its timestamp then reads as
+          # fresh while it still carries coverage of code this run never
+          # exercised. Shared mode clears its own file before the build;
+          # this file belongs to the caller, who may well be
+          # accumulating across two invocations on purpose, so note it
+          # rather than delete it.
+          PROJECT_STALE=''
+          if [ -n "$CALLER_FILE" ] && [ -f "$CALLER_FILE" ]; then
+            PROJECT_STALE='yes'
+          fi
+          PROJECT_MARKER=''
+          if [ -n "$CALLER_FILE" ]; then
+            MARKER_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+            PROJECT_MARKER="$(
+              mktemp "$MARKER_DIR/jacoco-build-start.XXXXXXXXXX"
+            )"
+          fi
+
+          echo "JaCoCo coverage layout left to the caller or the project"
+          {
+            echo "mode=project"
+            echo "data_file=$CALLER_FILE"
+            echo "data_preexisting=$PROJECT_STALE"
+            echo "marker_file=$PROJECT_MARKER"
+            echo "build_args="
+          } > "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # path_prefix passes validation as either an absolute or a
+        # relative directory, and gluing a workspace onto an absolute
+        # one points the agent at a tree that does not exist.
+        case "$PATH_PREFIX" in
+          /*) BASE_DIR="$PATH_PREFIX" ;;
+          *) BASE_DIR="$GITHUB_WORKSPACE/$PATH_PREFIX" ;;
+        esac
+        DATA_FILE="$BASE_DIR/target/jacoco-aggregate.exec"
+
+        # The build below expands these arguments unquoted, as it does
+        # every other Maven argument, so a path holding whitespace
+        # reaches Maven as several broken arguments and no file gets
+        # written. Leave the build alone rather than break it.
+        case "$DATA_FILE" in
+          *[[:space:]]*)
+            echo "::notice::The project path holds whitespace, so a" \
+              "shared JaCoCo path cannot reach Maven intact; leaving" \
+              "coverage per subproject"
+            exit 0
+            ;;
+          # A comma has two ways to spoil a shared path, and neither
+          # one announces itself. The agent takes its options as one
+          # comma-separated string and splits it at a comma that a name
+          # and an equals sign follow, so destfile=/tmp/x,append=false/
+          # j.exec writes /tmp/x and drops the rest; verified against
+          # JaCoCo 0.8.12, where a plain comma survives intact. Sonar
+          # then separates sonar.coverage.jacoco.xmlReportPaths with a
+          # comma and offers no escape, so a report path holding one
+          # reaches Sonar as two paths that name nothing. Aggregating
+          # coverage nothing can read is worth less than leaving the
+          # build alone.
+          *,*)
+            echo "::notice::The project path holds a comma, which" \
+              "neither the JaCoCo agent nor a Sonar report path can" \
+              "carry; leaving coverage per subproject"
+            exit 0
+            ;;
+        esac
+
+        # The agents append, which is what lets the subprojects
+        # accumulate into one file. Left over from an earlier run in the
+        # same workspace, or from a build without clean, that same
+        # appending merges stale coverage into this run, and a run that
+        # tests nothing would publish the previous run's figures.
+        rm -f "$DATA_FILE"
+
+        # A marker the report step dates test output against. Surefire
+        # and Failsafe directories survive a workspace reused between
+        # runs, and a build without clean keeps its own, so their mere
+        # presence says nothing about whether this build ran a test.
+        MARKER_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+        MARKER_FILE="$(mktemp "$MARKER_DIR/jacoco-build-start.XXXXXXXXXX")"
+
+        echo "Sharing JaCoCo execution data across subprojects: $DATA_FILE"
+        {
+          echo "mode=shared"
+          echo "data_file=$DATA_FILE"
+          echo "marker_file=$MARKER_FILE"
+          printf 'build_args=-Djacoco.destFile=%s ' "$DATA_FILE"
+          printf -- '-Djacoco.dataFile=%s\n' "$DATA_FILE"
+        } > "$GITHUB_OUTPUT"
+
     - name: 'Build code with Maven'
+      id: maven-build
       shell: bash
       env:
         PATH_PREFIX: ${{ inputs.path_prefix }}
@@ -156,6 +912,7 @@ runs:
         MVN_PROFILES: ${{ inputs.mvn-profiles }}
         MVN_OPTS: ${{ inputs.mvn-opts }}
         MVN_PARAMS: ${{ inputs.mvn-params }}
+        JACOCO_ARGS: ${{ steps.jacoco-mode.outputs.build_args }}
       # yamllint disable rule:line-length
       run: |
         echo "Maven build starting"
@@ -208,56 +965,6 @@ runs:
         fi
 
         # Expand ${VAR} references in the caller's Maven arguments.
-        #
-        # Maven interpolates ${...} only in a value reaching it through
-        # POM interpolation. A user property a plugin reads directly,
-        # -Djacoco.dataFile or -Dsonar.* among them, keeps the literal
-        # text, and the shell does not help either: it word-splits
-        # $MVN_PARAMS below but never re-expands ${...} inside the
-        # value. Jenkins expanded these before Maven started, so a
-        # caller writing an absolute workspace path reasonably expects
-        # the same.
-        #
-        # Expand a fixed list of workspace variables. Bash string
-        # operations rather than eval or a subprocess: nothing here
-        # executes, so $(...), backticks and $((...)) stay inert, and
-        # the step gains no dependency beyond the shell it already runs
-        # in. The name list is explicit because this step's environment
-        # holds GITHUB_TOKEN and whatever env-secrets the caller
-        # injected above; anything outside the list, including Maven's
-        # own ${project.*} and ${settings.*}, passes through for Maven
-        # to resolve.
-        expand_workspace_vars() {
-          local text="$1" out='' head rest raw name value
-          local allow=' GITHUB_WORKSPACE GITHUB_REPOSITORY GITHUB_REF_NAME'
-          allow="$allow GITHUB_SHA GITHUB_RUN_ID RUNNER_TEMP RUNNER_OS "
-          while [ "${text#*'$'}" != "$text" ]; do
-            head="${text%%'$'*}"
-            rest="${text:${#head}+1}"
-            if [[ "$rest" =~ ^\{[A-Za-z_][A-Za-z0-9_]*\} ]]; then
-              raw="$BASH_REMATCH"
-              name="${raw:1:${#raw}-2}"
-            elif [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]* ]]; then
-              raw="$BASH_REMATCH"
-              name="$raw"
-            else
-              # A '$' introducing anything else -- '(', a backtick, a
-              # digit -- keeps its literal text and its meaning here,
-              # which is none.
-              out="$out$head\$"
-              text="$rest"
-              continue
-            fi
-            if [ "${allow#* "$name" }" != "$allow" ]; then
-              value="${!name-}"
-            else
-              value="\$$raw"
-            fi
-            out="$out$head$value"
-            text="${rest:${#raw}}"
-          done
-          printf '%s' "$out$text"
-        }
         # mvn-params and mvn-opts are whitespace-separated argument
         # strings, so a value carrying a space becomes two arguments
         # wherever it lands. That holds for the literal text as much as
@@ -279,6 +986,8 @@ runs:
           esac
         done
 
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
         MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
         MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
 
@@ -288,17 +997,292 @@ runs:
             $GLOBAL_SETTINGS_ARG \
             $PROFILES_ARG \
             -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo \
-            $MVN_OPTS $MVN_PARAMS
+            $MVN_OPTS $MVN_PARAMS $JACOCO_ARGS
+        # JACOCO_ARGS last on purpose. Maven honours the last repeated
+        # -D, verified against 3.9.9: -Dfoo=first -Dfoo=second resolves
+        # to second. These arguments only exist where the resolver has
+        # already decided the layout belongs to this action, so a caller
+        # path arriving later in mvn-opts or mvn-params would send the
+        # agents somewhere the report pass does not read.
       # yamllint enable rule:line-length
+
+    - name: 'Build aggregate JaCoCo report'
+      id: jacoco-report
+      shell: bash
+      if: ${{ always() && steps.jacoco-mode.outputs.data_file != '' }}
+      env:
+        BUILD_OUTCOME: ${{ steps.maven-build.outcome }}
+        PATH_PREFIX: ${{ inputs.path_prefix }}
+        MVN_POM_FILE: ${{ inputs.mvn-pom-file }}
+        MVN_PROFILES: ${{ inputs.mvn-profiles }}
+        JACOCO_MODE: ${{ steps.jacoco-mode.outputs.mode }}
+        DATA_FILE: ${{ steps.jacoco-mode.outputs.data_file }}
+        MARKER_FILE: ${{ steps.jacoco-mode.outputs.marker_file }}
+        DATA_PREEXISTING: ${{ steps.jacoco-mode.outputs.data_preexisting }}
+        GLOBAL_SETTINGS: ${{ inputs.global-settings }}
+        MVN_OPTS: ${{ inputs.mvn-opts }}
+        MVN_PARAMS: ${{ inputs.mvn-params }}
+      run: |
+        # Report every subproject against the shared execution data
+        set -euo pipefail
+
+        # The marker belongs to this step now, and both branches below
+        # exit before the settings file exists. Claim it up front so a
+        # build that ran no test, or one that failed, does not leave
+        # jacoco-build-start.* behind on a runner that keeps its
+        # temporary directory between jobs. The combined trap further
+        # down replaces this one and still covers the marker.
+        trap 'rm -f "$MARKER_FILE"' EXIT
+
+        # This step now runs even when the build failed, so that the
+        # marker never outlives the job on a runner that keeps its
+        # temporary directory. A failed build has nothing to report on,
+        # and the trap above has already claimed the cleanup.
+        if [ "$BUILD_OUTCOME" != 'success' ]; then
+          echo "The Maven build did not succeed; skipping the JaCoCo" \
+            "report pass"
+          exit 0
+        fi
+
+        # A second Maven invocation, after the reactor finishes. The
+        # report bound inside the build runs as each subproject reaches
+        # its own report phase, when the later subprojects have yet to
+        # run a test. Running the goal again once the reactor has
+        # finished gives each subproject a report covering the whole run.
+        # Existence alone is not enough. In project mode the file
+        # belongs to the caller, so this step cannot clear it before the
+        # build, and a run that reused the workspace leaves the previous
+        # run's execution data sitting there. Reporting against that
+        # yields fresh XML full of stale coverage, which is worse than
+        # the failure it hides. Require the data to be newer than the
+        # marker this build laid down.
+        DATA_FRESH=''
+        if [ -f "$DATA_FILE" ]; then
+          if [ -z "$MARKER_FILE" ] || [ ! -f "$MARKER_FILE" ]; then
+            DATA_FRESH='yes'
+          elif [ "$DATA_FILE" -nt "$MARKER_FILE" ]; then
+            DATA_FRESH='yes'
+          else
+            echo "::notice::JaCoCo execution data at $DATA_FILE" \
+              "predates this build; treating it as absent"
+          fi
+        fi
+        if [ -z "$DATA_FRESH" ]; then
+          # A build that ran no test writes no execution data, and that
+          # is the build saying so rather than anything going wrong.
+          # A build that ran tests and still wrote none means the agent
+          # never reached the file this step was told to read, which
+          # reaches Sonar as a coverage figure of zero. Say so loudly
+          # rather than hand on an empty report.
+          RAN_TESTS=''
+          if [ -n "$MARKER_FILE" ] && [ -f "$MARKER_FILE" ]; then
+            # Newer than the marker this build laid down, so output left
+            # by an earlier run in the same workspace does not count.
+            # -H because path_prefix may be a directory symlink, and
+            # find would otherwise walk none of it and report that no
+            # test ran, hiding the very failure this branch exists for.
+            RAN_TESTS="$(find -H "$PATH_PREFIX" -type f \
+              -path '*/surefire-reports/*' -newer "$MARKER_FILE" \
+              -print -quit)"
+            if [ -z "$RAN_TESTS" ]; then
+              RAN_TESTS="$(find -H "$PATH_PREFIX" -type f \
+                -path '*/failsafe-reports/*' -newer "$MARKER_FILE" \
+                -print -quit)"
+            fi
+          fi
+          if [ -n "$RAN_TESTS" ]; then
+            echo "Error: tests ran, yet no JaCoCo execution data" >&2
+            echo "reached $DATA_FILE ❌" >&2
+            echo "The JaCoCo agent wrote elsewhere, or never ran." >&2
+            echo "Set jacoco-mode to project or off where the" >&2
+            echo "project places its own coverage data." >&2
+            exit 1
+          fi
+          echo "::notice::No test ran, so no JaCoCo execution data" \
+            "reached $DATA_FILE; skipping the aggregate report"
+          exit 0
+        fi
+        # Freshness by timestamp cannot see inside the file. Where the
+        # data file predates the build, the agents appended this run's
+        # records to whatever was already there, and the report covers
+        # both. Say so: a coverage figure that counts a previous run is
+        # the kind of wrong that reads as right.
+        if [ "${DATA_PREEXISTING:-}" = 'yes' ]; then
+          echo "::warning::JaCoCo execution data at $DATA_FILE existed" \
+            "before this build, and the agents append, so the report" \
+            "may count coverage from an earlier run; remove it before" \
+            "the build, or run with jacoco-mode: shared, to report on" \
+            "this run alone"
+        fi
+
+        PROFILES_ARG=''
+        if [ -n "$MVN_PROFILES" ]; then
+          PROFILES_ARG="-P $MVN_PROFILES"
+        fi
+        # The same profiles the build ran with. A profile may add a
+        # subproject or configure JaCoCo, and a report reactor missing
+        # those leaves the subprojects it skipped with no XML at all.
+        # The plugin carries no version on purpose. Maven takes it from
+        # the project's own pluginManagement, so the report is produced
+        # by the same JaCoCo that wrote the execution data. Pinning a
+        # version here would read a file a different version wrote.
+        # shellcheck disable=SC2086
+        # The same settings, repository and reactor selection the build
+        # ran with. mvn-opts carries the local repository, so a report
+        # pass without it resolves the plugin from somewhere the build
+        # never used, and a private or restricted build fails here after
+        # succeeding above. mvn-params carries selectors such as -pl,
+        # which decide which subprojects exist to report on.
+        # global-settings carries the settings document itself, not a
+        # path, so materialise it the same way the build step does:
+        # under RUNNER_TEMP rather than the workspace, at an
+        # unpredictable name mktemp creates at 0600, removed on the way
+        # out. A settings document commonly carries credentials, and
+        # mvn here runs repository-controlled code as this user.
+        # One trap for both files, since Bash keeps one per signal. The
+        # marker was laid down by the resolver step and has no use past
+        # this point.
+        GLOBAL_SETTINGS_FILE=''
+        trap 'rm -f "$GLOBAL_SETTINGS_FILE" "$MARKER_FILE"' EXIT
+
+        GLOBAL_SETTINGS_ARG=''
+        if [ -n "$GLOBAL_SETTINGS" ]; then
+          SETTINGS_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          GLOBAL_SETTINGS_FILE="$(
+            mktemp "${SETTINGS_DIR}/maven-global-settings.XXXXXXXXXX"
+          )"
+          printf '%s' "$GLOBAL_SETTINGS" > "$GLOBAL_SETTINGS_FILE"
+          GLOBAL_SETTINGS_ARG="--global-settings $GLOBAL_SETTINGS_FILE"
+        fi
+
+        # Every find -newer below dates from here, not from the marker
+        # laid down before the build. A report bound into the build
+        # lifecycle has already written XML and CSV by now, and reporting
+        # those as the aggregate would hand on exactly the per-subproject
+        # figures this step exists to replace. Only what this pass writes
+        # counts.
+        if [ -n "$MARKER_FILE" ]; then
+          touch "$MARKER_FILE"
+        fi
+
+        # The same expansion the build applies, so this pass reads the
+        # arguments Maven received there rather than literal text.
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
+        MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
+        MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
+
+        # shellcheck disable=SC2086
+        mvn --batch-mode --no-transfer-progress \
+          -f "$PATH_PREFIX/$MVN_POM_FILE" $PROFILES_ARG \
+          $GLOBAL_SETTINGS_ARG \
+          $MVN_OPTS $MVN_PARAMS \
+          org.jacoco:jacoco-maven-plugin:report \
+          -Djacoco.skip=false \
+          -Djacoco.dataFile="$DATA_FILE"
+        # -Djacoco.skip=false because a POM property of jacoco.skip
+        # reaches this report the same way it reaches the build, and a
+        # project that skips JaCoCo by property while an execution turns
+        # it back on would otherwise skip the report and hand Sonar a
+        # coverage figure of zero. Verified against Maven 3.9.9 and
+        # JaCoCo 0.8.12: a -D lifts a property, and the resolver above
+        # steps aside where a configuration element sets the skip, since
+        # an element beats a -D. This pass runs only where the resolver
+        # scheduled it, so forcing the goal on cannot silence a project
+        # that meant to turn coverage off.
+        # Name the files that exist rather than the place they usually
+        # land. jacoco:report honours the project's outputDirectory and
+        # formats, so a project can write its XML somewhere else or not
+        # write XML at all, and a fixed glob would then point callers at
+        # nothing while claiming coverage. Sonar takes a comma-separated
+        # list, so report what the pass actually produced.
+        # Absolute, because Sonar resolves
+        # sonar.coverage.jacoco.xmlReportPaths against each subproject's
+        # basedir. A workspace-relative path would be joined onto every
+        # subproject in turn and find nothing.
+        case "$PATH_PREFIX" in
+          /*) SEARCH_ROOT="$PATH_PREFIX" ;;
+          *) SEARCH_ROOT="$PWD/$PATH_PREFIX" ;;
+        esac
+        # Joined with commas, so a path holding one would reach Sonar
+        # as two paths naming nothing. The resolver keeps a comma out of
+        # a shared path, and this covers the caller-owned path a project
+        # mode build reports against.
+        REPORTS=''
+        while IFS= read -r XML; do
+          [ -n "$XML" ] || continue
+          case "$XML" in
+            *,*)
+              echo "::warning::Skipping JaCoCo XML report '$XML': the" \
+                "Sonar report path list separates paths with a comma" \
+                "and offers no escape for one"
+              continue
+              ;;
+          esac
+          REPORTS="${REPORTS:+$REPORTS,}$XML"
+        done <<< "$(find -H "$SEARCH_ROOT" -type f -name 'jacoco*.xml' \
+          -newer "$MARKER_FILE" -print 2>/dev/null)"
+        if [ -z "$REPORTS" ]; then
+          echo "::warning::The JaCoCo report pass produced no XML;" \
+            "the project may configure other formats or another" \
+            "output directory"
+        fi
+        echo "coverage_report_paths=$REPORTS" >> "$GITHUB_OUTPUT"
+
+        # The badge and summary read CSV, not XML, and they default to
+        # the root target/site/jacoco/jacoco.csv. A reactor root is
+        # packaging pom and builds no such file, so the badge would stay
+        # empty next to sound subproject reports. Name the CSV this pass
+        # produced instead.
+        #
+        # Workspace-relative, unlike the XML above. The badge generator
+        # is a Docker action: the workspace mounts at /github/workspace,
+        # so a runner-absolute path names nothing inside the container.
+        # The generator also splits its input on whitespace, so a path
+        # containing any cannot be passed; drop those rather than hand
+        # over a list that silently means something else.
+        CSVS=''
+        CSV_LIST="$(find -H "$SEARCH_ROOT" -type f -name 'jacoco*.csv' \
+          -newer "$MARKER_FILE" -print 2>/dev/null || true)"
+        while IFS= read -r CSV; do
+          [ -n "$CSV" ] || continue
+          case "$CSV" in
+            "$GITHUB_WORKSPACE"/*) CSV="${CSV#"$GITHUB_WORKSPACE"/}" ;;
+            *)
+              echo "::warning::Skipping JaCoCo CSV report '$CSV' for" \
+                "the badge: it sits outside the workspace the badge" \
+                "generator container mounts"
+              continue
+              ;;
+          esac
+          case "$CSV" in
+            *[[:space:]]*)
+              echo "::warning::Skipping JaCoCo CSV report '$CSV' for" \
+                "the badge: the generator separates paths with" \
+                "whitespace"
+              continue
+              ;;
+          esac
+          CSVS="${CSVS:+$CSVS }$CSV"
+        done <<< "$CSV_LIST"
+        echo "coverage_csv_paths=$CSVS" >> "$GITHUB_OUTPUT"
 
     - name: 'Generate JaCoCo Badge'
       id: jacoco
-      # skip during local testing
-      if: ${{ !env.ACT && inputs.run-jacoco == 'true' }}
+      # Skipped during local testing, and skipped where an aggregate
+      # report was scheduled and wrote no CSV. The fallback path below
+      # names the conventional root report, which a workspace reused
+      # without a clean still holds from an earlier run; badging that
+      # would hand on the stale figure the report step refused. A build
+      # with no aggregate scheduled keeps the fallback it always had.
+      # yamllint disable-line rule:line-length
+      if: ${{ !env.ACT && inputs.run-jacoco == 'true' && (steps.jacoco-mode.outputs.data_file == '' || steps.jacoco-report.outputs.coverage_csv_paths != '') }}
       # yamllint disable-line rule:line-length
       uses: cicirello/jacoco-badge-generator@72266185b7ee48a6fd74eaf0238395cc8b14fef8 # v2.12.1
       with:
         badges-directory: badges
+        # yamllint disable-line rule:line-length
+        jacoco-csv-file: ${{ steps.jacoco-report.outputs.coverage_csv_paths || 'target/site/jacoco/jacoco.csv' }}
         generate-branches-badge: true
         generate-summary: true
         on-missing-report: quiet

@@ -93,6 +93,10 @@ jobs:
           mvn-version: '3.9.11'
           path_prefix: 'nonrtric-plt-rappmanager'
           mvn-phases: 'clean compile test'
+          # Distinct names: the badge artifact defaults to one name per
+          # job, and this job runs the action twice, so both uploads
+          # would claim the same name and the second fails with a 409.
+          artifact-name: 'maven-build-with-global-settings'
           mvn-opts: >-
             -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
             -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
@@ -105,6 +109,7 @@ jobs:
           mvn-version: '3.9.11'
           path_prefix: 'nonrtric-plt-rappmanager'
           mvn-phases: 'clean compile'
+          artifact-name: 'maven-build-without-global-settings'
           # yamllint disable rule:line-length
           mvn-opts: >-
             -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
@@ -142,6 +147,253 @@ jobs:
       - name: "Check the workspace-variable allowlist"
         shell: bash
         run: ./tests/expand-workspace-vars.sh
+
+  test-jacoco-mode:
+    name: "Test JaCoCo Mode Resolution"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Run the JaCoCo mode test suite"
+        shell: bash
+        run: |
+          ./tests/jacoco-mode.sh
+
+  test-subproject-coverage:
+    name: "Test Subproject Coverage"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The fixture holds its code in 'core' and its only test in 'app',
+      # so a report built per subproject credits core with nothing.
+      - name: "Build the fixture reactor"
+        id: first-build
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check coverage crosses the subproject boundary"
+        shell: bash
+        env:
+          COVERAGE: ${{ steps.first-build.outputs.coverage }}
+        run: |
+          set -euo pipefail
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-covered
+          # The badge generator defaults to the root
+          # target/site/jacoco/jacoco.csv, and a reactor root is
+          # packaging pom, so it builds no such file. Without the
+          # subproject CSV reports the badge and summary stay empty
+          # beside perfectly good coverage.
+          if [ -z "$COVERAGE" ]; then
+            echo "The coverage output is empty despite reports" >&2
+            exit 1
+          fi
+          echo "Coverage reported: $COVERAGE"
+
+      # A failed build skips nothing that owns the start marker: the
+      # report step claims it under always(), so a runner that keeps its
+      # temporary directory does not accumulate them.
+      - name: "Build a reactor that fails"
+        id: failing-build
+        continue-on-error: true
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean no-such-phase"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check the failed build left no start marker"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.failing-build.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" != 'failure' ]; then
+            echo "Expected the build to fail, got '$OUTCOME'" >&2
+            exit 1
+          fi
+          LEFTOVER="$(find "$RUNNER_TEMP" -maxdepth 1 \
+            -name 'jacoco-build-start.*' -print 2>/dev/null)"
+          if [ -n "$LEFTOVER" ]; then
+            echo "Start marker survived a failed build:" >&2
+            echo "$LEFTOVER" >&2
+            exit 1
+          fi
+          echo "No start marker left behind"
+
+      # A parallel reactor has several agents appending to one file at
+      # once, so the action leaves the layout alone. Each subproject then
+      # reports its own data, and core shows nothing. Wrong-but-honest
+      # beats corrupt.
+      - name: "Build the fixture reactor in parallel"
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          mvn-params: "-T 2"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check the parallel build kept the project layout"
+        shell: bash
+        run: |
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-none
+
+      # An explicit shared mode is the caller deciding the layout, so the
+      # action's own -D has to beat a JaCoCo path arriving in mvn-params.
+      # Maven honours the last repeated -D, so ordering decides this.
+      - name: "Build with a caller JaCoCo path alongside shared mode"
+        id: shared-override
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          jacoco-mode: "shared"
+          mvn-params: "-Djacoco.destFile=/tmp/caller-owned.exec"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check shared mode won and the paths are absolute"
+        shell: bash
+        env:
+          REPORTS: ${{ steps.shared-override.outputs.coverage_report_paths }}
+        run: |
+          set -euo pipefail
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-covered
+          # Sonar resolves these against each subproject basedir, so a
+          # relative path would be joined onto every subproject and find
+          # nothing.
+          case "$REPORTS" in
+            /*) echo "coverage_report_paths is absolute: $REPORTS" ;;
+            '') echo "No coverage report paths reported" >&2; exit 1 ;;
+            *) echo "Not absolute: $REPORTS" >&2; exit 1 ;;
+          esac
+
+      # A project that turns JaCoCo off by property while its agent
+      # execution turns it back on. The agent writes, so coverage must
+      # reach the report: the report pass has to lift the property, or
+      # it exits zero having written no XML at all.
+      - name: "Build the fixture reactor with JaCoCo skipped by property"
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          mvn-profiles: "skip-by-property"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check the property-skipped build still reports coverage"
+        shell: bash
+        run: |
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject
+
+      # A project that runs tests without a JaCoCo agent must build and
+      # pass. The report step fails a shared-mode build that ran tests and
+      # produced no data, so a gate that mistakes a declared plugin for a
+      # running one would break an ordinary project.
+      - name: "Build the fixture reactor with the agent skipped"
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          mvn-params: "-Djacoco.skip=true"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check the skipped build produced no coverage"
+        shell: bash
+        run: |
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-none
+
+      # A build that runs no test writes no execution data, so the
+      # report pass has nothing to hand the badge. The badge step falls
+      # back to the conventional root CSV, which a reused workspace
+      # still holds from an earlier run, so it has to stay skipped
+      # rather than badge the stale figure planted here.
+      - name: "Plant a stale root coverage report"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/site/jacoco
+          {
+            printf '%s' "GROUP,PACKAGE,CLASS,INSTRUCTION_MISSED,"
+            printf '%s' "INSTRUCTION_COVERED,BRANCH_MISSED,"
+            printf '%s' "BRANCH_COVERED,LINE_MISSED,LINE_COVERED,"
+            printf '%s' "COMPLEXITY_MISSED,COMPLEXITY_COVERED,"
+            printf '%s\n' "METHOD_MISSED,METHOD_COVERED"
+            echo "stale,fixture,Old,0,100,0,10,0,20,0,5,0,5"
+          } > target/site/jacoco/jacoco.csv
+
+      - name: "Build the fixture reactor without running tests"
+        id: no-tests
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          mvn-params: "-DskipTests"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check a build with no tests badged nothing"
+        shell: bash
+        env:
+          COVERAGE: ${{ steps.no-tests.outputs.coverage }}
+        run: |
+          set -euo pipefail
+          rm -rf target/site/jacoco
+          if [ -n "$COVERAGE" ]; then
+            echo "Coverage came from the stale report: $COVERAGE" >&2
+            exit 1
+          fi
+          echo "No coverage reported, as expected"
+
+      # jacoco-mode off leaves the build exactly as it was.
+      - name: "Build the fixture reactor with aggregation off"
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          jacoco-mode: "off"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check aggregation off changed nothing"
+        shell: bash
+        run: |
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-none
 
   test-failure-scenarios:
     name: "Test Build Failure"
