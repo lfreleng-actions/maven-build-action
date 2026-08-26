@@ -859,17 +859,21 @@ runs:
               "coverage per subproject"
             exit 0
             ;;
-          # The agent takes its options as one comma-separated string,
-          # and splits it at a comma that a name and an equals sign
-          # follow. Verified against JaCoCo 0.8.12: a path holding a
-          # plain comma survives intact and the file lands where it
-          # says, while destfile=/tmp/x,append=false/j.exec writes
-          # /tmp/x and drops the rest of the path without a word. The
-          # report pass would then fail a build whose tests ran.
-          *,*=*)
-            echo "::notice::The project path holds a comma that reads" \
-              "as a JaCoCo agent option, so the shared path would be" \
-              "cut short; leaving coverage per subproject"
+          # A comma has two ways to spoil a shared path, and neither
+          # one announces itself. The agent takes its options as one
+          # comma-separated string and splits it at a comma that a name
+          # and an equals sign follow, so destfile=/tmp/x,append=false/
+          # j.exec writes /tmp/x and drops the rest; verified against
+          # JaCoCo 0.8.12, where a plain comma survives intact. Sonar
+          # then separates sonar.coverage.jacoco.xmlReportPaths with a
+          # comma and offers no escape, so a report path holding one
+          # reaches Sonar as two paths that name nothing. Aggregating
+          # coverage nothing can read is worth less than leaving the
+          # build alone.
+          *,*)
+            echo "::notice::The project path holds a comma, which" \
+              "neither the JaCoCo agent nor a Sonar report path can" \
+              "carry; leaving coverage per subproject"
             exit 0
             ;;
         esac
@@ -1200,8 +1204,24 @@ runs:
           /*) SEARCH_ROOT="$PATH_PREFIX" ;;
           *) SEARCH_ROOT="$PWD/$PATH_PREFIX" ;;
         esac
-        REPORTS="$(find -H "$SEARCH_ROOT" -type f -name 'jacoco*.xml' \
-          -newer "$MARKER_FILE" -print 2>/dev/null | paste -sd, -)"
+        # Joined with commas, so a path holding one would reach Sonar
+        # as two paths naming nothing. The resolver keeps a comma out of
+        # a shared path, and this covers the caller-owned path a project
+        # mode build reports against.
+        REPORTS=''
+        while IFS= read -r XML; do
+          [ -n "$XML" ] || continue
+          case "$XML" in
+            *,*)
+              echo "::warning::Skipping JaCoCo XML report '$XML': the" \
+                "Sonar report path list separates paths with a comma" \
+                "and offers no escape for one"
+              continue
+              ;;
+          esac
+          REPORTS="${REPORTS:+$REPORTS,}$XML"
+        done <<< "$(find -H "$SEARCH_ROOT" -type f -name 'jacoco*.xml' \
+          -newer "$MARKER_FILE" -print 2>/dev/null)"
         if [ -z "$REPORTS" ]; then
           echo "::warning::The JaCoCo report pass produced no XML;" \
             "the project may configure other formats or another" \

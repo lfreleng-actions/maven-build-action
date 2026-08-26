@@ -224,6 +224,11 @@ project.
 `auto` steps aside where the project directory holds whitespace, since the shared
 path could not reach Maven as one argument.
 
+`auto` steps aside where the project directory holds a comma too. The JaCoCo
+agent takes its options as one comma-separated string, and Sonar separates
+`sonar.coverage.jacoco.xmlReportPaths` the same way with no escape available.
+Such a path reaches one of them as something other than the file it names.
+
 `auto` steps aside for `-Djacoco.append=false` as well. The shared file works
 because every subproject's agent appends to it; turn appending off and each
 subproject overwrites the last, leaving the file holding whichever subproject

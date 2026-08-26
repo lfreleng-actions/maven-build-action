@@ -530,14 +530,13 @@ T_EPOM="$(printf '%s\n' '<projects>'; proj '<jacoco.skip>true</jacoco.skip>'; \
   proj '<jacoco.skip>true</jacoco.skip>'; printf '%s\n' '</projects>')" \
   run 'every child skipping leaves no agent' off ''
 
-# The agent splits its option string at a comma that a name and an
-# equals sign follow, so such a path is cut short and the data lands
-# somewhere else. A plain comma is fine and must keep aggregating.
+# A comma spoils a shared path twice over: the agent splits its option
+# string at a comma a name and an equals sign follow, and Sonar
+# separates report paths with a comma and offers no escape.
 T_PREFIX='/tmp/od,append=false' \
   run 'comma reading as an agent option steps aside' off ''
 T_PREFIX='/tmp/od,inary' \
-  run 'plain comma in the path still aggregates' shared \
-  '/tmp/od,inary/target/jacoco-aggregate.exec'
+  run 'a plain comma steps aside for the report path' off ''
 
 # The build expands a fixed list of workspace variables before Maven
 # reads them, so the resolver has to read the same values. Reading the
