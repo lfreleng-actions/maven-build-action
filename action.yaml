@@ -385,7 +385,9 @@ runs:
         # leaving it behind hands it to everything else in the job.
         GLOBAL_SETTINGS_FILE=''
         EPOM_FILE=''
-        trap 'rm -f "$GLOBAL_SETTINGS_FILE" "$EPOM_FILE"' EXIT
+        EPOM_DESTS=''
+        trap 'rm -f "$GLOBAL_SETTINGS_FILE" "$EPOM_FILE" "$EPOM_DESTS"' \
+          EXIT
 
         GLOBAL_SETTINGS_ARG=''
         if [ -n "$GLOBAL_SETTINGS" ]; then
@@ -445,12 +447,19 @@ runs:
         # plugin-level configuration and a default-cli execution reach
         # it. pluginManagement declares versions without running
         # anything and is dropped.
+        # Destinations the parser finds in live agent configuration,
+        # one per line. A separate channel because they are a list,
+        # while the facts below are a single line of scalars. Named in
+        # the trap above, which runs on an early exit as well.
+        EPOM_DESTS="$(mktemp)"
         EPOM_FACTS='agent=unknown owns=no eskip= pskip= eappend='
         EPOM_FACTS="$EPOM_FACTS eoutput= edump= pdest= pdata="
         EPOM_FACTS="$EPOM_FACTS propappend= propoutput= propdump="
         CLI_SKIP="$(lc "$(last_arg_value 'jacoco.skip')")"
         if [ -s "$EPOM_FILE" ]; then
-          EPOM_FACTS="$(awk -v cliskip="$CLI_SKIP" '
+          EPOM_FACTS="$(awk -v cliskip="$CLI_SKIP" \
+            -v destout="$EPOM_DESTS" -v clidest="$CALLER_DEST" \
+            -v cliout="$OUTPUT_ARG" -v clidump="$DUMP_ARG" '
             function boolof(l,   t) {
               t = l
               sub(/^[^>]*>/, "", t); sub(/<.*$/, "", t)
@@ -461,8 +470,33 @@ runs:
               sub(/^[^>]*>/, "", t); sub(/<.*$/, "", t)
               return t
             }
+            # An effective POM is XML, so a path holding any of the five
+            # reserved characters arrives escaped and a value used as a
+            # filename has to come back. Ampersand last, or a decoded
+            # &amp;lt; would be read a second time as a less-than.
+            function unxml(t,   n, c, i, p) {
+              while (match(t, /&#[Xx]?[0-9A-Fa-f]+;/)) {
+                n = substr(t, RSTART + 2, RLENGTH - 3)
+                if (n ~ /^[Xx]/) {
+                  # By hand rather than strtonum, which gawk has and
+                  # the mawk on a stock runner does not.
+                  n = tolower(substr(n, 2)); c = 0
+                  for (i = 1; i <= length(n); i++) {
+                    p = index("0123456789abcdef", substr(n, i, 1))
+                    c = c * 16 + p - 1
+                  }
+                } else { c = n + 0 }
+                t = substr(t, 1, RSTART - 1) sprintf("%c", c) \
+                  substr(t, RSTART + RLENGTH)
+              }
+              gsub(/&lt;/, "<", t); gsub(/&gt;/, ">", t)
+              gsub(/&quot;/, "\"", t); gsub(/&apos;/, "'"'"'", t)
+              gsub(/&amp;/, "\\&", t)
+              return t
+            }
             function analyse(   i, l, inexs, ex, goals, eskip, ea, er,
-                                id, pskip, s, pappend, poutput, pdump,
+                                id, pskip, s, d, o, u,
+                                pappend, poutput, pdump,
                                 eappend, eoutput, edump, m) {
               pskip = ""; pappend = ""; poutput = ""; pdump = ""
               for (i = 1; i <= n; i++) {
@@ -472,6 +506,7 @@ runs:
                 if (inexs) { continue }
                 if (l ~ /<skip>/) { pskip = boolof(l) }
                 if (l ~ /<(destFile|dataFile)[ \/>]/) { owns = 1 }
+                if (l ~ /<destFile[ \/>]/) { pdestv = textof(l) }
                 # Plugin-level defaults, not verdicts. Maven merges an
                 # execution over these, so a live execution turning
                 # appending back on, or the output back to a file, is
@@ -494,7 +529,7 @@ runs:
                 if (!inexs) { continue }
                 if (l ~ /<execution>/) {
                   ex = 1; goals = ""; eskip = ""
-              ea = 0; er = 0; id = ""
+              ea = 0; er = 0; id = ""; edestv = ""
                   eappend = ""; eoutput = ""; edump = ""; continue
                 }
                 if (l ~ /<\/execution>/) {
@@ -526,6 +561,37 @@ runs:
                       if (m == "false") { owns = 1 }
                       if (s != "") { fskip = s }
                       nlive++
+                      # Where this live agent writes, by the same
+                      # precedence Maven applies: an element beats a
+                      # caller -D, which beats a property. That
+                      # property belongs to this project alone, so a
+                      # sibling naming a destination says nothing about
+                      # this module. Nothing outside a running
+                      # prepare-agent places coverage, so nothing else
+                      # is collected.
+                      # Decoded where the value came out of the XML,
+                      # left alone where it came off the command line:
+                      # Maven passes a -D through as written, so
+                      # decoding one would name a file nothing writes.
+                      d = (edestv != "") ? edestv : pdestv
+                      if (d != "") { d = unxml(d) }
+                      else if (clidest != "") { d = clidest }
+                      else { d = unxml(pdestprop) }
+                      # An agent writing to a socket, or dropped before
+                      # it dumps, leaves nothing at that path, so it is
+                      # no file for shared mode to clear or collect.
+                      # Resolved the same way, per execution and per
+                      # project, rather than from the reactor-wide
+                      # flags gathered above.
+                      o = (eoutput != "") ? eoutput : poutput
+                      if (o == "") { o = cliout }
+                      if (o == "") { o = poutprop }
+                      u = (edump != "") ? edump : pdump
+                      if (u == "") { u = clidump }
+                      if (u == "") { u = pdumpprop }
+                      if (o != "" && o != "file") { d = "" }
+                      if (u == "false") { d = "" }
+                      if (d != "") { print d > destout }
                     }
                   }
                   if (id == "default-cli" && er) { owns = 1 }
@@ -535,7 +601,7 @@ runs:
                 if (l ~ /<id>/) { id = textof(l) }
                 if (l ~ /<goal>/) { goals = goals textof(l) " " }
                 if (l ~ /<skip>/) { eskip = boolof(l) }
-                if (l ~ /<destFile[ \/>]/) { ea = 1 }
+                if (l ~ /<destFile[ \/>]/) { ea = 1; edestv = textof(l) }
                 if (l ~ /<append>/) { eappend = boolof(l) }
                 if (l ~ /<output>/) { eoutput = boolof(l) }
                 if (l ~ /<dumpOnExit>/) { edump = boolof(l) }
@@ -557,20 +623,28 @@ runs:
             # in a build it took no part in. help:effective-pom writes
             # the properties of each project above its build, so a scan
             # reaching an execution has read them already.
-            /<project[ >]/ { pomskip = "" }
+            /<project[ >]/ {
+              pomskip = ""; pdestprop = ""; poutprop = ""; pdumpprop = ""
+            }
             /<jacoco\.skip>/ { pomskip = boolof($0) }
-            /<jacoco\.destFile[ \/>]/ { pdest = 1 }
+            /<jacoco\.destFile[ \/>]/ { pdest = 1; pdestprop = textof($0) }
             /<jacoco\.dataFile[ \/>]/ { pdata = 1 }
             /<jacoco\.append>[[:space:]]*[Ff]/ { qappend = 1 }
             /<jacoco\.output>[[:space:]]*(tcpserver|tcpclient|none)/ {
               qoutput = 1
             }
+            # The same two properties again, kept per project rather
+            # than as the reactor-wide flags above. A
+            # module turning its agent into a tcpserver says nothing
+            # about where a sibling writes.
+            /<jacoco\.output[ \/>]/ { poutprop = tolower(textof($0)) }
+            /<jacoco\.dumpOnExit[ \/>]/ { pdumpprop = boolof($0) }
             /<jacoco\.dumpOnExit>[[:space:]]*[Ff]/ { qdump = 1 }
             /<pluginManagement>/ { pm = 1 }
             /<\/pluginManagement>/ { pm = 0; next }
             pm { next }
             /<\/plugin>/ { if (inp && jac) { analyse() } inp = 0; next }
-            /<plugin>/ { inp = 1; n = 0; jac = 0; next }
+            /<plugin>/ { inp = 1; n = 0; jac = 0; pdestv = ""; next }
             inp {
               buf[++n] = $0
               if ($0 ~ /jacoco-maven-plugin/) { jac = 1 }
@@ -772,9 +846,78 @@ runs:
           fi
         fi
 
+        EXTRA_DATA_FILE=''
         if [ "$JACOCO_MODE" = 'shared' ]; then
           # An explicit shared is the caller deciding. Inferring from a
           # path they also passed would override the mode they named.
+          # Nothing overrides that path any more, though, so the agent
+          # still writes where jacoco.destFile says. Keep that one for
+          # the report step to combine along with each subproject's own
+          # data. jacoco.dataFile is where a report reads rather than
+          # where the agent writes, so a caller naming only that leaves
+          # the agent on its per-subproject default, which the report
+          # step finds under the project anyway.
+          # Only an absolute path names one file for the whole reactor,
+          # for the same reason the project-mode branch below gives.
+          # Maven resolves a relative one against each subproject, so
+          # it names as many files as there are subprojects; those sit
+          # under the project and the report step finds them, while the
+          # path read here would name some unrelated file beside the
+          # action's working directory. Discovery reaches them only
+          # where they stay under the project and answer to *.exec,
+          # which is a shape the caller chose and can change, so say so
+          # rather than report a coverage figure short of what ran.
+          # Without an effective POM there is no execution to resolve
+          # anything against, so the caller's own -D is all this step
+          # knows about, and only where the caller has not already said
+          # the agent writes no file. With one, the parser has already
+          # resolved all of that per live agent.
+          if [ ! -s "$EPOM_FILE" ]; then
+            case "$OUTPUT_ARG:$DUMP_ARG" in
+              tcpserver:*|tcpclient:*|none:*|*:false) ;;
+              *) printf '%s\n' "$CALLER_DEST" > "$EPOM_DESTS" ;;
+            esac
+          fi
+          # Every destination a live agent writes to survives now that
+          # nothing overrides it, whether it came from the caller, from
+          # a property or from a configuration element. Each absolute
+          # one puts coverage wherever it says, and discovery under the
+          # project need not reach there, so collect every one of them
+          # rather than settle on a single winner. The parser supplies
+          # them already scoped to live prepare-agent executions, so a
+          # version pinned in pluginManagement, a skipped execution, a
+          # profile that never activated, an unrelated plugin that
+          # happens to configure a destFile of its own, and an agent
+          # that writes no file at all, all stay out of a list this
+          # step goes on to clear.
+          while read -r POM_DEST; do
+            case "$POM_DEST" in
+              '') continue ;;
+              /*)
+                EXTRA_DATA_FILE="$(printf '%s\n%s' "$EXTRA_DATA_FILE" \
+                  "$POM_DEST" | grep . || true)"
+                ;;
+              ../*|*/../*)
+                echo "::warning::JaCoCo path '$POM_DEST' is" \
+                  "relative and leads back out of the subprojects" \
+                  "Maven resolves it against, so the coverage written" \
+                  "there goes unfound; name an absolute path to have" \
+                  "it collected"
+                ;;
+              *.exec)
+                echo "::notice::JaCoCo path '$POM_DEST' is" \
+                  "relative, so Maven resolves it per subproject;" \
+                  "leaving those files to discovery"
+                ;;
+              *)
+                echo "::warning::JaCoCo path '$POM_DEST' is" \
+                  "relative and does not end in .exec, so the" \
+                  "coverage each subproject writes there goes" \
+                  "unfound; name an absolute path to have it collected"
+                ;;
+            esac
+          done < "$EPOM_DESTS"
+          EXTRA_DATA_FILE="$(printf '%s' "$EXTRA_DATA_FILE" | sort -u)"
           CALLER_FILE=''
           PROJECT_FILE=''
         fi
@@ -856,17 +999,7 @@ runs:
         # module's clean touches a directory it does not own.
         DATA_FILE="$BASE_DIR/.jacoco/jacoco-aggregate.exec"
 
-        # The build below expands these arguments unquoted, as it does
-        # every other Maven argument, so a path holding whitespace
-        # reaches Maven as several broken arguments and no file gets
-        # written. Leave the build alone rather than break it.
         case "$DATA_FILE" in
-          *[[:space:]]*)
-            echo "::notice::The project path holds whitespace, so a" \
-              "shared JaCoCo path cannot reach Maven intact; leaving" \
-              "coverage per subproject"
-            exit 0
-            ;;
           # A comma has two ways to spoil a shared path, and neither
           # one announces itself. The agent takes its options as one
           # comma-separated string and splits it at a comma that a name
@@ -886,28 +1019,80 @@ runs:
             ;;
         esac
 
-        # The agents append, which is what lets the subprojects
-        # accumulate into one file. Left over from an earlier run in the
-        # same workspace, or from a build without clean, that same
-        # appending merges stale coverage into this run, and a run that
-        # tests nothing would publish the previous run's figures.
+        # Left over from an earlier run in the same workspace, or from a
+        # build without clean, stale execution data would otherwise be
+        # reported as this run's coverage. The report step assembles the
+        # file from scratch, and clearing it here keeps a run that never
+        # reaches that step from publishing the previous run's figures.
         rm -f "$DATA_FILE"
         mkdir -p "${DATA_FILE%/*}"
+        MARKER_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+        # An explicit shared mode owns the layout, and the agents append
+        # to whatever is already at a destination the caller or the
+        # project named. Left alone, this run's records would join an
+        # earlier run's and the report would count both.
+        EXTRA_LIST_FILE="$(mktemp "$MARKER_DIR/jacoco-extra.XXXXXXXXXX")"
+        while IFS= read -r EXTRA_PATH; do
+          [ -n "$EXTRA_PATH" ] || continue
+          printf '%s\n' "$EXTRA_PATH" >> "$EXTRA_LIST_FILE"
+          [ -f "$EXTRA_PATH" ] || continue
+          echo "::notice::Clearing JaCoCo execution data left at" \
+            "$EXTRA_PATH, which shared mode reports on as this" \
+            "run's coverage"
+          rm -f "$EXTRA_PATH"
+        done <<< "$EXTRA_DATA_FILE"
 
         # A marker the report step dates test output against. Surefire
         # and Failsafe directories survive a workspace reused between
         # runs, and a build without clean keeps its own, so their mere
         # presence says nothing about whether this build ran a test.
-        MARKER_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
         MARKER_FILE="$(mktemp "$MARKER_DIR/jacoco-build-start.XXXXXXXXXX")"
 
+        # Each subproject's own execution data can outlive a run too,
+        # and the agent appends to it. A file the build touches carries
+        # this run's records after whatever an earlier one left, and a
+        # timestamp cannot tell the two apart. Note how much of each
+        # file is already there, and what it holds: the agent opens for
+        # append and writes a header of its own, so everything past that
+        # point belongs to this run and reads as a stream on its own.
+        # The digest says whether that is what happened. A build that
+        # cleans away one of these files and writes a longer one leaves
+        # it longer too, and skipping into the middle of that would cost
+        # the run every record the file holds.
+        SNAPSHOT_FILE="$(mktemp "$MARKER_DIR/jacoco-pre-exec.XXXXXXXXXX")"
+        case "$PATH_PREFIX" in
+          /*) SNAP_ROOT="$PATH_PREFIX" ;;
+          *) SNAP_ROOT="$PWD/$PATH_PREFIX" ;;
+        esac
+        while IFS= read -r PRE_FILE; do
+          [ -n "$PRE_FILE" ] || continue
+          printf '%s %s %s\n' "$(wc -c < "$PRE_FILE")" \
+            "$(sha256sum < "$PRE_FILE" | cut -d' ' -f1)" "$PRE_FILE" \
+            >> "$SNAPSHOT_FILE"
+        done <<< "$(find -H "$SNAP_ROOT" -type f -name '*.exec' \
+          -print 2>/dev/null || true)"
+
         echo "Sharing JaCoCo execution data across subprojects: $DATA_FILE"
+        # No -Djacoco.destFile here, deliberately. prepare-agent and
+        # merge read the same ${jacoco.destFile} property, and merge
+        # offers no property for its inputs, so pointing the agent at a
+        # shared file also points every jacoco:merge execution in the
+        # reactor at it. Such an execution then writes its own inputs
+        # over the shared file and discards the coverage every earlier
+        # subproject had accumulated. Verified against
+        # opendaylight/yangtools, where yang-maven-plugin-it merges its
+        # integration-test data near the end of the reactor: coverage
+        # collapsed to the handful of packages that one merge covered
+        # and every subproject tested before it reported zero. Let each
+        # subproject write its own execution data, as it would without
+        # this action, and let the report step below combine them.
         {
           echo "mode=shared"
           echo "data_file=$DATA_FILE"
           echo "marker_file=$MARKER_FILE"
-          printf 'build_args=-Djacoco.destFile=%s ' "$DATA_FILE"
-          printf -- '-Djacoco.dataFile=%s\n' "$DATA_FILE"
+          echo "snapshot_file=$SNAPSHOT_FILE"
+          echo "extra_list_file=$EXTRA_LIST_FILE"
+          echo "build_args="
         } > "$GITHUB_OUTPUT"
 
     - name: 'Build code with Maven'
@@ -1027,6 +1212,8 @@ runs:
         JACOCO_MODE: ${{ steps.jacoco-mode.outputs.mode }}
         DATA_FILE: ${{ steps.jacoco-mode.outputs.data_file }}
         MARKER_FILE: ${{ steps.jacoco-mode.outputs.marker_file }}
+        SNAPSHOT_FILE: ${{ steps.jacoco-mode.outputs.snapshot_file }}
+        EXTRA_LIST_FILE: ${{ steps.jacoco-mode.outputs.extra_list_file }}
         DATA_PREEXISTING: ${{ steps.jacoco-mode.outputs.data_preexisting }}
         GLOBAL_SETTINGS: ${{ inputs.global-settings }}
         MVN_OPTS: ${{ inputs.mvn-opts }}
@@ -1041,7 +1228,9 @@ runs:
         # jacoco-build-start.* behind on a runner that keeps its
         # temporary directory between jobs. The combined trap further
         # down replaces this one and still covers the marker.
-        trap 'rm -f "$MARKER_FILE"' EXIT
+        STAGED_FILE=''
+        trap 'rm -f "$MARKER_FILE" "$SNAPSHOT_FILE" "$STAGED_FILE" \
+          "$EXTRA_LIST_FILE"' EXIT
 
         # This step now runs even when the build failed, so that the
         # marker never outlives the job on a runner that keeps its
@@ -1051,6 +1240,140 @@ runs:
           echo "The Maven build did not succeed; skipping the JaCoCo" \
             "report pass"
           exit 0
+        fi
+
+        # In shared mode each subproject wrote its own execution data,
+        # so combine it here instead. A JaCoCo exec file is a stream of
+        # blocks whose reader accepts a header block anywhere after the
+        # first, which is exactly how the agent's own append mode
+        # extends a file, so concatenating them is a merge. Verified
+        # against ExecutionDataReader in JaCoCo 0.8.15.
+        if [ "$JACOCO_MODE" = 'shared' ]; then
+          case "$PATH_PREFIX" in
+            /*) SEARCH_ROOT="$PATH_PREFIX" ;;
+            *) SEARCH_ROOT="$PWD/$PATH_PREFIX" ;;
+          esac
+          # An agent may have written this run's coverage to the very
+          # path this mode aggregates into, whether the destination
+          # named it outright or a relative one resolved to it.
+          # Removing it to start the aggregate would throw that away,
+          # and the aggregate excludes itself from discovery, so the
+          # run would end with no execution data at all. Move it aside
+          # instead. Nothing is compared to decide that: the resolver
+          # cleared this path before the build, so whatever sits here
+          # now is coverage this run produced.
+          if [ -f "$DATA_FILE" ]; then
+            STAGED_FILE="$(mktemp \
+              "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/jacoco-caller.XXXXXXXXXX")"
+            mv "$DATA_FILE" "$STAGED_FILE"
+          fi
+          mkdir -p "${DATA_FILE%/*}"
+          # Data a previous run left behind is not this run's coverage,
+          # and a workspace reused without clean keeps it.
+          if [ -n "$MARKER_FILE" ] && [ -f "$MARKER_FILE" ]; then
+            set -- -newer "$MARKER_FILE"
+          else
+            set --
+          fi
+          # A destination the caller or the project named alongside an
+          # explicit shared mode still has an agent writing there, and
+          # there is no reason for it to sit under the project.
+          EXEC_LIST="$(find -H "$SEARCH_ROOT" -type f -name '*.exec' \
+            "$@" -print 2>/dev/null || true)"
+          # The same freshness rule the discovered files answer to: a
+          # destination named outside the build holds whatever an
+          # earlier run left there when this run's agent never wrote it.
+          while IFS= read -r EXTRA_PATH; do
+            [ -n "$EXTRA_PATH" ] || continue
+            [ -f "$EXTRA_PATH" ] || continue
+            if [ -f "$MARKER_FILE" ] \
+              && [ ! "$EXTRA_PATH" -nt "$MARKER_FILE" ]; then
+              continue
+            fi
+            EXEC_LIST="$(printf '%s\n%s' "$EXEC_LIST" "$EXTRA_PATH")"
+          done <<< "$(printf '%s\n%s\n' "$STAGED_FILE" \
+            "$(cat "$EXTRA_LIST_FILE" 2>/dev/null || true)")"
+          # Only files this reader can parse, and only one format among
+          # them. 01 c0 c0 is the block type and magic number opening a
+          # JaCoCo exec file, and the two bytes after it are the format
+          # version the reader refuses to mix. Read the version rather
+          # than name one, so a JaCoCo that changes it does not leave
+          # this rejecting every file the build wrote.
+          CANDIDATES=''
+          while IFS= read -r EXEC_FILE; do
+            [ -n "$EXEC_FILE" ] || continue
+            [ "$EXEC_FILE" != "$DATA_FILE" ] || continue
+            # Past whatever this file already held before the build,
+            # but only where the build appended to it. Growth alone
+            # says nothing: a build that cleans the file away and
+            # writes a longer one grows it too, and skipping into that
+            # would cost the run every record the file holds. The
+            # earlier bytes have to still be there, unchanged.
+            SKIP=0
+            if [ -n "$SNAPSHOT_FILE" ] && [ -f "$SNAPSHOT_FILE" ]; then
+              while IFS=' ' read -r PRE_SIZE PRE_DIGEST PRE_PATH; do
+                [ "$PRE_PATH" = "$EXEC_FILE" ] || continue
+                if [ "$(wc -c < "$EXEC_FILE")" -gt "$PRE_SIZE" ] \
+                  && [ "$(head -c "$PRE_SIZE" "$EXEC_FILE" \
+                    | sha256sum | cut -d' ' -f1)" = "$PRE_DIGEST" ]; then
+                  SKIP="$PRE_SIZE"
+                fi
+                break
+              done < "$SNAPSHOT_FILE"
+            fi
+            # od seeks and stops by itself. Reading the header through
+            # a pipe would leave the reader exiting first on any file
+            # worth reading, and pipefail turns that into a failure.
+            FILE_HEADER="$(od -An -tx1 -N 5 -j "$SKIP" "$EXEC_FILE" \
+              | tr -d ' \n')"
+            case "$FILE_HEADER" in
+              01c0c0????) ;;
+              *) continue ;;
+            esac
+            CANDIDATES="$(printf '%s\n%s %s %s' "$CANDIDATES" \
+              "$FILE_HEADER" "$SKIP" "$EXEC_FILE")"
+          done <<< "$(printf '%s\n' "$EXEC_LIST" | sort -u)"
+          # The format the build actually wrote is the one most of these
+          # carry. Taking it from whichever file came first would let a
+          # single stray one from a nested build on another JaCoCo cost
+          # the run every real report.
+          FORMAT_COUNTS="$(printf '%s\n' "$CANDIDATES" | sed '/^$/d' \
+            | cut -d' ' -f1 | sort | uniq -c | sort -rn)"
+          EXEC_HEADER="$(printf '%s\n' "$FORMAT_COUNTS" | head -1 \
+            | awk '{print $2}')"
+          # No majority is no answer. A format merely ahead of the rest
+          # still leaves half the files behind, and discarding them
+          # silently is the partial coverage this guard exists to
+          # prevent. Insist on more than half. No files at all is a
+          # different matter, answered further down by whether tests
+          # ran: a build that skipped them has nothing to collect.
+          if [ -n "$FORMAT_COUNTS" ] \
+            && [ "$(printf '%s\n' "$FORMAT_COUNTS" \
+              | awk 'NR == 1 { top = $1 } { n += $1 }
+                END { print (top * 2 > n) ? "yes" : "no" }')" != 'yes' ]
+          then
+            echo "Error: the JaCoCo execution data collected carries" >&2
+            echo "more than one format, and none of them a majority ❌" >&2
+            printf '%s\n' "$FORMAT_COUNTS" >&2
+            echo "The reader refuses to mix formats, so which of them" >&2
+            echo "this run's coverage lives in cannot be settled here." >&2
+            echo "Remove the execution data that does not belong to" >&2
+            echo "this build, or set jacoco-mode to project." >&2
+            exit 1
+          fi
+          EXEC_COUNT=0
+          while IFS=' ' read -r FILE_HEADER SKIP EXEC_FILE; do
+            [ -n "$EXEC_FILE" ] || continue
+            if [ "$FILE_HEADER" != "$EXEC_HEADER" ]; then
+              echo "::warning::Ignoring $EXEC_FILE: JaCoCo format" \
+                "${FILE_HEADER#01c0c0} against ${EXEC_HEADER#01c0c0}"
+              continue
+            fi
+            tail -c "+$((SKIP + 1))" "$EXEC_FILE" >> "$DATA_FILE"
+            EXEC_COUNT=$((EXEC_COUNT + 1))
+          done <<< "$CANDIDATES"
+          echo "Combined JaCoCo execution data from $EXEC_COUNT" \
+            "subproject file(s) into $DATA_FILE"
         fi
 
         # A second Maven invocation, after the reactor finishes. The
@@ -1152,7 +1475,8 @@ runs:
         # marker was laid down by the resolver step and has no use past
         # this point.
         GLOBAL_SETTINGS_FILE=''
-        trap 'rm -f "$GLOBAL_SETTINGS_FILE" "$MARKER_FILE"' EXIT
+        trap 'rm -f "$GLOBAL_SETTINGS_FILE" "$MARKER_FILE" \
+          "$SNAPSHOT_FILE" "$STAGED_FILE" "$EXTRA_LIST_FILE"' EXIT
 
         GLOBAL_SETTINGS_ARG=''
         if [ -n "$GLOBAL_SETTINGS" ]; then
