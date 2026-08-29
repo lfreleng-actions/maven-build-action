@@ -446,7 +446,7 @@ T_EPOM='<project><build/></project>' \
 T_EPOM="$(epom '<destFile>x</destFile>')" \
   run 'JaCoCo plugin with destFile config'                          project ''
 # --- an absolute path_prefix is not glued onto the workspace
-T_PREFIX="$WS" run 'absolute path_prefix'                           shared "$WS/target/jacoco-aggregate.exec"
+T_PREFIX="$WS" run 'absolute path_prefix'                           shared "$WS/.jacoco/jacoco-aggregate.exec"
 
 # --- a shared path holding whitespace cannot survive the build's expansion
 T_PREFIX='/tmp/a b' run 'whitespace in path -> leave alone'          off ''

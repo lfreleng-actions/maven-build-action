@@ -846,7 +846,15 @@ runs:
           /*) BASE_DIR="$PATH_PREFIX" ;;
           *) BASE_DIR="$GITHUB_WORKSPACE/$PATH_PREFIX" ;;
         esac
-        DATA_FILE="$BASE_DIR/target/jacoco-aggregate.exec"
+        # Not under target/: a reactor root is a module too, and its
+        # clean deletes its own target/. Maven orders the root last
+        # wherever the root artifact depends on one of its modules, so
+        # the root's clean then runs after every subproject has written
+        # coverage and takes the merged file with it. Verified against
+        # opendaylight/yangtools, whose root sorts 120th of 120 and
+        # deleted the file seconds before this action read it. No
+        # module's clean touches a directory it does not own.
+        DATA_FILE="$BASE_DIR/.jacoco/jacoco-aggregate.exec"
 
         # The build below expands these arguments unquoted, as it does
         # every other Maven argument, so a path holding whitespace
@@ -884,6 +892,7 @@ runs:
         # appending merges stale coverage into this run, and a run that
         # tests nothing would publish the previous run's figures.
         rm -f "$DATA_FILE"
+        mkdir -p "${DATA_FILE%/*}"
 
         # A marker the report step dates test output against. Surefire
         # and Failsafe directories survive a workspace reused between
