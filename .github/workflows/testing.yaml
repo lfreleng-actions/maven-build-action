@@ -217,6 +217,31 @@ jobs:
           fi
           echo "Coverage reported: $COVERAGE"
 
+      # A reactor root is a module too, and its clean deletes its own
+      # target/. Maven orders the root last wherever the root artifact
+      # depends on one of its modules, so a shared file kept under
+      # target/ leaves with the root's clean, after every subproject
+      # has written to it.
+      - name: "Check the shared data file escapes mvn clean"
+        shell: bash
+        env:
+          DATA_FILE: ${{ steps.first-build.outputs.jacoco_data_file }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DATA_FILE" ]; then
+            echo "The action reported no shared JaCoCo data file" >&2
+            exit 1
+          fi
+          case "$DATA_FILE" in
+            */target/*)
+              echo "Shared execution data sits under target/, which" >&2
+              echo "mvn clean deletes: $DATA_FILE" >&2
+              exit 1
+              ;;
+          esac
+          echo "Shared data file clear of any build directory:"
+          echo "$DATA_FILE"
+
       # A failed build skips nothing that owns the start marker: the
       # report step claims it under always(), so a runner that keeps its
       # temporary directory does not accumulate them.
