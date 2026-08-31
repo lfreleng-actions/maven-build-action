@@ -197,7 +197,7 @@ a bare `-Djacoco.skip` reads as `true` the way Maven reads it.
 | Value     | Behaviour                                                          |
 | --------- | ------------------------------------------------------------------ |
 | `auto`    | Default. Picks `shared` or `project` from what the build declares. |
-| `shared`  | Points every subproject at one execution file, then reports each subproject against it after the reactor finishes. |
+| `shared`  | Leaves the build's JaCoCo arguments alone, then combines what each subproject wrote into one execution file and reports each subproject against it. |
 | `project` | Leaves the layout to the project. Reports against a caller-supplied `jacoco.dataFile` once the reactor finishes.    |
 | `off`     | Changes nothing.                                                   |
 
@@ -216,26 +216,40 @@ merges its subprojects' execution data therefore keeps its own layout, and an
 injected `-D` never moves the agent output away from the place that merge step
 reads.
 
+`shared` mode injects nothing into the build. `prepare-agent` and `merge` read
+the same `jacoco.destFile` property, and `merge` offers no property for its own
+inputs, so a `-D` pointing the agent at one shared file points every
+`jacoco:merge` execution in the reactor at it too, and such an execution writes
+its own inputs over the file. Each subproject therefore writes where its own
+configuration says, and this action combines those files once the reactor
+finishes.
+
+It collects every `*.exec` under the project directory written after the build
+began, plus the path a caller named in `mvn-params` alongside an explicit
+`shared`. Each has to open with the JaCoCo block type and magic number, and to
+carry the format version most of them carry, since the reader refuses to mix
+versions and one file from a nested build on another JaCoCo would otherwise
+cost the run every real report. This action then joins what survives end to
+end: the reader accepts a header block anywhere after the first, which is how
+the agent's own append mode extends a file, so joining them is a merge.
+
 `auto` steps aside for a caller path Maven resolves per subproject. An absolute
 `jacoco.dataFile` names one file for the whole reactor. A relative one names a
 separate file under each subproject, so the report pass leaves it to the
 project.
-
-`auto` steps aside where the project directory holds whitespace, since the shared
-path could not reach Maven as one argument.
 
 `auto` steps aside where the project directory holds a comma too. The JaCoCo
 agent takes its options as one comma-separated string, and Sonar separates
 `sonar.coverage.jacoco.xmlReportPaths` the same way with no escape available.
 Such a path reaches one of them as something other than the file it names.
 
-`auto` steps aside for `-Djacoco.append=false` as well. The shared file works
-because every subproject's agent appends to it; turn appending off and each
-subproject overwrites the last, leaving the file holding whichever subproject
-ran last.
+`auto` steps aside for `-Djacoco.append=false` as well. A module whose tests
+fork more than one JVM has each fork overwrite the last, leaving its execution
+data holding whichever fork ran last.
 
-`auto` also steps aside for a parallel reactor. Agents appending to one file at
-once overwrite each other's records, so a build carrying `-T` or
+`auto` also steps aside for a parallel reactor. Agents running at once can
+share a file the project configured for them and overwrite each other's
+records, so a build carrying `-T` or
 `--threads` — in `mvn-params`, in `mvn-opts`, in `MAVEN_ARGS`, or in a
 checked-in `.mvn/maven.config` — keeps coverage per subproject. The scan
 skips comment lines in that file, and walks upward from the POM directory to the
@@ -329,11 +343,23 @@ sound subproject reports. Those paths are workspace-relative, unlike
 workspace mounted at `/github/workspace`, where a runner-absolute path names
 nothing.
 
-`shared` mode removes the aggregate file before the build. The agents append, so
-a file left from an earlier run in the same workspace, or from a build without
-`clean`, would otherwise merge stale coverage into this one. In `project` mode
-the file belongs to the caller and this action does not remove it, so execution
-data older than the build counts as absent rather than as coverage.
+`shared` mode removes the aggregate file before the build and assembles it
+again afterwards, so a file left from an earlier run in the same workspace, or
+from a build without `clean`, cannot reach this run's report. It clears a path
+the caller named alongside an explicit `shared` the same way, and every
+absolute destination a live `prepare-agent` execution writes to, whether it
+arrives as a `jacoco.destFile` property or as a `destFile` element: nothing
+overrides those any more, the agents append to whatever sits there, and shared
+mode reports each of them as this run's coverage. Maven resolves a relative
+destination against each subproject basedir instead of naming one file, so
+those land under the project and discovery collects them; the action says so in
+a notice. A relative path that discovery misses, because it climbs back out of
+the subprojects or ends in something other than `.exec`, raises a warning that
+names the absolute-path remedy. Select
+`project` mode for a project-managed destination this action should leave
+alone. In `project` mode the file belongs to the caller and this action does
+not remove it, so execution data older than the build counts as absent rather
+than as coverage.
 
 In `shared` mode, a build that ran tests and wrote no execution data fails.
 "Ran tests" means test output newer than a marker this action writes before the

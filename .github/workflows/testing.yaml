@@ -274,6 +274,88 @@ jobs:
           fi
           echo "No start marker left behind"
 
+      # A workspace reused without clean. This pair stands on its own
+      # rather than reading the first build's aggregate, since every
+      # shared-mode build between the two clears that path before it
+      # starts. Every module .exec from the build just above is still
+      # there, and the agent appends a second
+      # session to it rather than starting over, so the aggregate has
+      # to take only the bytes this run added. Collecting a whole file
+      # would carry the earlier run's coverage into this one's figures,
+      # which no percentage would reveal: both runs cover the same
+      # code. Count the session blocks instead, which says how many
+      # runs the aggregate holds.
+      - name: "Build the fixture reactor before a rebuild"
+        id: pre-rebuild
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Record the sessions the clean build aggregated"
+        id: clean-sessions
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGG=tests/fixtures/multi-subproject/.jacoco/jacoco-aggregate.exec
+          COUNT="$(./tests/count-exec-sessions.sh "$AGG")"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Clean build aggregated $COUNT session(s)"
+
+      - name: "Rebuild the fixture reactor without clean"
+        id: no-clean-build
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "verify"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check the rebuild aggregated only its own sessions"
+        shell: bash
+        env:
+          BEFORE: ${{ steps.clean-sessions.outputs.count }}
+          COVERAGE: ${{ steps.no-clean-build.outputs.coverage }}
+        run: |
+          set -euo pipefail
+          AGG=tests/fixtures/multi-subproject/.jacoco/jacoco-aggregate.exec
+          AFTER="$(./tests/count-exec-sessions.sh "$AGG")"
+          echo "Clean build: $BEFORE session(s), rebuild: $AFTER"
+          if [ "$BEFORE" -lt 1 ]; then
+            echo "The clean build aggregated nothing to compare against" >&2
+            exit 1
+          fi
+          if [ "$AFTER" != "$BEFORE" ]; then
+            echo "The rebuild carried the earlier run's sessions" >&2
+            exit 1
+          fi
+          if [ "$COVERAGE" != '1' ]; then
+            echo "Expected full coverage, got '$COVERAGE'" >&2
+            exit 1
+          fi
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-covered
+          # The count above only means anything where the agent really
+          # appended. Were a module .exec starting over each build, the
+          # aggregate would hold one session per module either way and
+          # this case would pass without touching the offset logic.
+          APPENDED=0
+          while IFS= read -r EXEC; do
+            [ -n "$EXEC" ] || continue
+            if [ "$(./tests/count-exec-sessions.sh "$EXEC")" -gt 1 ]; then
+              echo "Appended: $EXEC"
+              APPENDED=1
+            fi
+          done <<< "$(find tests/fixtures/multi-subproject -type f \
+            -name '*.exec' -not -path '*/.jacoco/*')"
+          if [ "$APPENDED" != '1' ]; then
+            echo "No module .exec was appended to; this case proves" \
+              "nothing about the offset logic" >&2
+            exit 1
+          fi
+
       # A parallel reactor has several agents appending to one file at
       # once, so the action leaves the layout alone. Each subproject then
       # reports its own data, and core shows nothing. Wrong-but-honest
@@ -293,9 +375,13 @@ jobs:
           ./tests/check-subproject-coverage.sh \
             tests/fixtures/multi-subproject expect-none
 
-      # An explicit shared mode is the caller deciding the layout, so the
-      # action's own -D has to beat a JaCoCo path arriving in mvn-params.
-      # Maven honours the last repeated -D, so ordering decides this.
+      # An explicit shared mode is the caller deciding the layout, so a
+      # JaCoCo path arriving in mvn-params is where the agent writes and
+      # where the action collects from. The merger subproject sits this
+      # one out: a caller's own -Djacoco.destFile points its merge at
+      # that same path, and merge writing its inputs over the file is
+      # the collision this fixture exists to reproduce. That is the
+      # caller's configuration doing it, and nothing here can undo it.
       - name: "Build with a caller JaCoCo path alongside shared mode"
         id: shared-override
         uses: ./
@@ -303,11 +389,12 @@ jobs:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
           jacoco-mode: "shared"
-          mvn-params: "-Djacoco.destFile=/tmp/caller-owned.exec"
+          mvn-params: >-
+            -Djacoco.destFile=/tmp/caller-owned.exec -pl !merger
           run-jacoco: "true"
           artifact-upload: "false"
 
-      - name: "Check shared mode won and the paths are absolute"
+      - name: "Check the caller path was collected and paths absolute"
         shell: bash
         env:
           REPORTS: ${{ steps.shared-override.outputs.coverage_report_paths }}
@@ -323,6 +410,46 @@ jobs:
             '') echo "No coverage report paths reported" >&2; exit 1 ;;
             *) echo "Not absolute: $REPORTS" >&2; exit 1 ;;
           esac
+
+      # A caller path naming the very file shared mode aggregates into,
+      # which is where the resolver puts it for this path_prefix. Every
+      # agent then writes this run's coverage exactly where the report
+      # step starts its aggregate, and nothing else names that file, so
+      # a report step that removed it rather than moving it aside would
+      # finish the run with no execution data at all. Absolute, since a
+      # relative value is resolved against each subproject basedir and
+      # would never land on the root. merger sits this one out for the
+      # reason the previous case gives.
+      - name: "Build with a caller path landing on the aggregate"
+        id: shared-onto-aggregate
+        uses: ./
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean verify"
+          jacoco-mode: "shared"
+          mvn-params: >-
+            -Djacoco.destFile=${{ github.workspace
+            }}/tests/fixtures/multi-subproject/.jacoco/jacoco-aggregate.exec
+            -pl !merger
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      - name: "Check the aggregate kept the coverage written onto it"
+        shell: bash
+        env:
+          COVERAGE: ${{ steps.shared-onto-aggregate.outputs.coverage }}
+        run: |
+          set -euo pipefail
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-covered
+          # The same figure the plain shared build reports for this
+          # fixture. Anything less means part of the run was thrown
+          # away rather than aggregated.
+          if [ "$COVERAGE" != '1' ]; then
+            echo "Expected full coverage, got '$COVERAGE'" >&2
+            exit 1
+          fi
+          echo "Coverage survived the aggregate path: $COVERAGE"
 
       # A project that turns JaCoCo off by property while its agent
       # execution turns it back on. The agent writes, so coverage must

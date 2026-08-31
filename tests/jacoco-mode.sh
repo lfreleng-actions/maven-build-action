@@ -110,10 +110,31 @@ run() {
     [ -n "${T_EPOM+x}" ] && export MVN_EPOM="$T_EPOM"
     [ -n "${T_EXIT+x}" ] && export MVN_EXIT="$T_EXIT"
     bash "$LOGIC" ) >/dev/null 2>&1 || rc=$?
-  local mode data stale
+  local mode data stale extra
   mode="$(sed -n 's/^mode=//p' "$out")"
   data="$(sed -n 's/^data_file=//p' "$out")"
   stale="$(sed -n 's/^data_preexisting=//p' "$out")"
+  local extra_list
+  extra_list="$(sed -n 's/^extra_list_file=//p' "$out")"
+  extra=''
+  if [ -n "$extra_list" ] && [ -f "$extra_list" ]; then
+    extra="$(tr '\n' ' ' < "$extra_list" | sed 's/ *$//')"
+  fi
+  # The step hands these to the report step, so it cannot remove them
+  # itself. This suite is the report step's stand-in, and a case runs
+  # once per assertion: left behind, they pile up a temporary file per
+  # run of the suite.
+  local f
+  for f in extra_list_file marker_file snapshot_file; do
+    f="$(sed -n "s/^$f=//p" "$out")"
+    [ -n "$f" ] && rm -f "$f"
+  done
+  if [ -n "${T_EXTRA+x}" ] && [ "$extra" != "$T_EXTRA" ]; then
+    FAIL=$((FAIL+1))
+    printf 'FAIL %-46s extra=%s expected=%s\n' "$name" "$extra" "$T_EXTRA"
+    rm -f "$out"
+    return
+  fi
   if [ -n "${T_STALE+x}" ] && [ "$stale" != "$T_STALE" ]; then
     FAIL=$((FAIL+1))
     printf 'FAIL %-46s stale=%s expected=%s\n' "$name" "$stale" "$T_STALE"
@@ -448,11 +469,138 @@ T_EPOM="$(epom '<destFile>x</destFile>')" \
 # --- an absolute path_prefix is not glued onto the workspace
 T_PREFIX="$WS" run 'absolute path_prefix'                           shared "$WS/.jacoco/jacoco-aggregate.exec"
 
-# --- a shared path holding whitespace cannot survive the build's expansion
-T_PREFIX='/tmp/a b' run 'whitespace in path -> leave alone'          off ''
+# --- nothing carries the shared path into the build any more, so
+# --- whitespace in it has nothing left to break
+T_PREFIX='/tmp/a b' run 'whitespace in path is no obstacle'  shared '/tmp/a b/.jacoco/jacoco-aggregate.exec'
 # --- an explicit shared is the caller deciding, not a hint to weigh
 T_MODE=shared T_PARAMS='-Djacoco.dataFile=/w/j.exec' \
   run 'explicit shared beats a caller path'                          shared '*'
+# --- the agent writes jacoco.destFile, so that is what shared collects
+T_MODE=shared T_PARAMS='-Djacoco.destFile=/w/d.exec' T_EXTRA='/w/d.exec' \
+  run 'explicit shared collects the caller destFile'                 shared '*'
+# --- jacoco.dataFile is read, never written: nothing extra to collect
+T_MODE=shared T_PARAMS='-Djacoco.dataFile=/w/j.exec' T_EXTRA='' \
+  run 'explicit shared ignores a caller dataFile'                    shared '*'
+# --- both, and they differ: the write path is the one that holds data
+T_MODE=shared T_EXTRA='/w/d.exec' \
+  T_PARAMS='-Djacoco.destFile=/w/d.exec -Djacoco.dataFile=/w/j.exec' \
+  run 'explicit shared prefers destFile over dataFile'               shared '*'
+# --- no caller path at all: the subproject files are the whole story
+T_MODE=shared T_EXTRA='' \
+  run 'explicit shared with no caller path'                          shared '*'
+# --- relative destFile names one file per subproject, not one file:
+# --- discovery finds those, and the path read here names none of them
+T_MODE=shared T_PARAMS='-Djacoco.destFile=cov.exec' T_EXTRA='' \
+  run 'explicit shared drops a relative destFile'                    shared '*'
+T_MODE=shared T_PARAMS='-Djacoco.destFile=../cov.exec' T_EXTRA='' \
+  run 'explicit shared drops an escaping destFile'                   shared '*'
+T_MODE=shared T_PARAMS='-Djacoco.destFile=./t/cov.exec' T_EXTRA='' \
+  run 'explicit shared drops a dot-relative destFile'                shared '*'
+T_MODE=shared T_PARAMS='-Djacoco.destFile=cov.data' T_EXTRA='' \
+  run 'explicit shared drops a non-exec destFile'                    shared '*'
+# --- nothing overrides a POM destFile any more, so an absolute one
+# --- puts coverage where discovery under the project need not reach
+T_MODE=shared T_EXTRA='/tmp/project.exec' \
+  T_EPOM="$(epom '' '' '' '<jacoco.destFile>/tmp/project.exec</jacoco.destFile>')" \
+  run 'explicit shared collects a POM destFile'                      shared '*'
+# --- a relative one resolves per subproject, where discovery finds it
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(epom '' '' '' '<jacoco.destFile>t/cov.exec</jacoco.destFile>')" \
+  run 'explicit shared leaves a relative POM destFile'               shared '*'
+# --- a caller -D outranks the property, so the property is not read
+T_MODE=shared T_EXTRA='/w/d.exec' T_PARAMS='-Djacoco.destFile=/w/d.exec' \
+  T_EPOM="$(epom '' '' '' '<jacoco.destFile>/tmp/project.exec</jacoco.destFile>')" \
+  run 'a caller destFile outranks the POM property'                  shared '*'
+# --- an inactive profile appears in the effective POM in full, and a
+# --- destination that never applies places no coverage anywhere
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(printf '<project>\n  <profiles>\n    <profile>\n      <properties>\n        <jacoco.destFile>/tmp/inactive.exec</jacoco.destFile>\n      </properties>\n    </profile>\n  </profiles>\n%s' "$(epom | tail -n +2)")" \
+  run 'explicit shared skips a profile destFile'                     shared '*'
+# --- a configuration element outranks the caller -D, so it is read
+# --- even where one was passed, and both are cleared and collected
+T_MODE=shared T_EXTRA='/tmp/element.exec' \
+  T_EPOM="$(epom '<destFile>/tmp/element.exec</destFile>')" \
+  run 'explicit shared collects a destFile element'                  shared '*'
+# --- nothing but a live prepare-agent places coverage, so a version
+# --- pinned in pluginManagement is no destination to clear
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(printf '%s' "$DEFAULT_EPOM" | sed 's|  <build>|  <build>\
+    <pluginManagement>\
+      <plugins>\
+        <plugin>\
+          <artifactId>jacoco-maven-plugin</artifactId>\
+          <configuration>\
+            <destFile>/tmp/managed.exec</destFile>\
+          </configuration>\
+        </plugin>\
+      </plugins>\
+    </pluginManagement>|')" \
+  run 'explicit shared skips a pluginManagement destFile'            shared '*'
+# --- and neither is a destFile some unrelated plugin configures
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(printf '%s' "$DEFAULT_EPOM" | sed 's|</plugins>|  <plugin>\
+          <artifactId>some-other-plugin</artifactId>\
+          <configuration>\
+            <destFile>/tmp/other.exec</destFile>\
+          </configuration>\
+        </plugin>\
+      </plugins>|')" \
+  run 'explicit shared skips an unrelated destFile'                  shared '*'
+# --- a skipped execution runs no agent, so its destination is not ours
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(printf '%s' "$DEFAULT_EPOM" | sed 's|          </executions>|  <execution>\
+              <goals><goal>prepare-agent</goal></goals>\
+              <configuration>\
+                <skip>true</skip>\
+                <destFile>/tmp/skipped.exec</destFile>\
+              </configuration>\
+            </execution>\
+          </executions>|')" \
+  run 'explicit shared skips a skipped destFile'                     shared '*'
+# --- a relative project destination is warned about, not collected
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(epom '<destFile>../cov.exec</destFile>')" \
+  run 'explicit shared skips a relative destFile'                    shared '*'
+# --- an effective POM is XML, so a path is read back decoded
+T_MODE=shared T_EXTRA='/tmp/a&b.exec' \
+  T_EPOM="$(epom '<destFile>/tmp/a&amp;b.exec</destFile>')" \
+  run 'explicit shared decodes an escaped destFile'                  shared '*'
+# --- an agent writing to a socket puts no file at its destFile
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(epom '<destFile>/tmp/tcp.exec</destFile>
+          <output>tcpserver</output>')" \
+  run 'explicit shared skips a tcpserver destFile'                   shared '*'
+# --- and neither does one dropped before it dumps
+T_MODE=shared T_EXTRA='' \
+  T_EPOM="$(epom '<destFile>/tmp/nodump.exec</destFile>
+          <dumpOnExit>false</dumpOnExit>')" \
+  run 'explicit shared skips a dumpOnExit=false destFile'            shared '*'
+# --- a caller destFile an agent never writes to is no file either
+T_MODE=shared T_PARAMS='-Djacoco.destFile=/w/d.exec
+  -Djacoco.output=tcpserver' T_EXTRA='' \
+  run 'explicit shared skips a socket caller destFile'               shared '*'
+# --- and a sibling on a socket says nothing about this module, so
+# --- the output property is read per project, not reactor-wide
+T_MODE=shared T_EXTRA='/tmp/second.exec' \
+  T_EPOM="$(epom '' '' '' '<jacoco.output>tcpserver</jacoco.output>')
+$(epom '<destFile>/tmp/second.exec</destFile>')" \
+  run 'explicit shared reads output per project'                     shared '*'
+# --- Maven passes a -D through as written, so a caller path holding
+# --- an ampersand is not XML and is not decoded
+T_MODE=shared T_PARAMS='-Djacoco.destFile=/tmp/a&amp;b.exec' \
+  T_EXTRA='/tmp/a&amp;b.exec' \
+  run 'explicit shared leaves a caller destFile literal'             shared '*'
+# --- with no effective POM there is nothing to resolve against, so the
+# --- caller -D stands alone, but only where a file is written at all
+T_MODE=shared T_EXIT=1 T_PARAMS='-Djacoco.destFile=/w/d.exec' \
+  T_EXTRA='/w/d.exec' \
+  run 'no effective POM keeps the caller destFile'                   shared '*'
+T_MODE=shared T_EXIT=1 T_EXTRA='' \
+  T_PARAMS='-Djacoco.destFile=/w/d.exec -Djacoco.output=tcpserver' \
+  run 'no effective POM still drops a socket destFile'               shared '*'
+T_MODE=shared T_EXIT=1 T_EXTRA='' \
+  T_PARAMS='-Djacoco.destFile=/w/d.exec -Djacoco.dumpOnExit=false' \
+  run 'no effective POM still drops an undumped destFile'            shared '*'
 
 # Project mode reports on a file the caller owns, and the agents append
 # to it, so one left by an earlier run in a reused workspace carries its

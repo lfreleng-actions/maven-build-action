@@ -21,6 +21,7 @@ difference is the behaviour under test.
   <modules>
     <module>core</module>
     <module>app</module>
+    <module>merger</module>
   </modules>
 
   <properties>

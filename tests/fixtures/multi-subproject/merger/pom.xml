@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+A subproject that merges execution data of its own, the way a project
+running integration tests in a nested build does. It exists to hold the
+action to one behaviour: prepare-agent and merge read the same
+${jacoco.destFile} property, so an action that points the agent at a
+shared file points this merge at it too, and this merge then writes its
+own inputs over everything the earlier subprojects accumulated.
+
+It depends on app purely to sort last in the reactor, so the damage
+would land after the coverage that core's report is checked for.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.lfreleng.fixture</groupId>
+    <artifactId>multi-subproject</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>merger</artifactId>
+
+  <properties>
+    <!--
+      The data a nested build produces exists only where that build
+      ran, so skipping tests leaves this merge nothing to write, the
+      same as the integration-test merge it stands in for.
+    -->
+    <skipTests>false</skipTests>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.lfreleng.fixture</groupId>
+      <artifactId>app</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <!--
+            merge writes nothing when the data it loads holds no
+            execution, so the input is checked in rather than produced
+            by this build: a nested build's execution data exists
+            whatever the outer agent was told to write, and that is the
+            case being reproduced. Its one class belongs to no module
+            here, so a merge that lands on the shared file replaces
+            every subproject's coverage with nothing.
+          -->
+          <execution>
+            <id>merge-reports</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>merge</goal>
+            </goals>
+            <configuration>
+              <skip>${skipTests}</skip>
+              <fileSets>
+                <fileSet>
+                  <directory>${project.basedir}</directory>
+                  <includes>
+                    <include>prebuilt.exec</include>
+                  </includes>
+                </fileSet>
+              </fileSets>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
