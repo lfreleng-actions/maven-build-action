@@ -34,12 +34,8 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: "Checkout maven-build-action repository"
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          path: maven-build-action
-
+      # $/ loads this action at the running commit without a checkout,
+      # so the workspace holds only the project under test.
       - name: "Checkout nonrtric-plt-rappmanager repository"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,7 +61,7 @@ jobs:
           echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
 
       - name: "Running maven-build-action (with global-settings)"
-        uses: ./maven-build-action
+        uses: $/.
         with:
           # yamllint disable rule:line-length
           global-settings: |
@@ -103,7 +99,7 @@ jobs:
           # yamllint enable rule:line-length
 
       - name: "Running maven-build-action (without global-settings)"
-        uses: ./maven-build-action
+        uses: $/.
         with:
           java-version: '17'
           mvn-version: '3.9.11'
@@ -191,7 +187,7 @@ jobs:
       # so a report built per subproject credits core with nothing.
       - name: "Build the fixture reactor"
         id: first-build
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -248,7 +244,7 @@ jobs:
       - name: "Build a reactor that fails"
         id: failing-build
         continue-on-error: true
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean no-such-phase"
@@ -287,7 +283,7 @@ jobs:
       # runs the aggregate holds.
       - name: "Build the fixture reactor before a rebuild"
         id: pre-rebuild
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -306,7 +302,7 @@ jobs:
 
       - name: "Rebuild the fixture reactor without clean"
         id: no-clean-build
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "verify"
@@ -361,7 +357,7 @@ jobs:
       # reports its own data, and core shows nothing. Wrong-but-honest
       # beats corrupt.
       - name: "Build the fixture reactor in parallel"
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -384,7 +380,7 @@ jobs:
       # caller's configuration doing it, and nothing here can undo it.
       - name: "Build with a caller JaCoCo path alongside shared mode"
         id: shared-override
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -422,7 +418,7 @@ jobs:
       # reason the previous case gives.
       - name: "Build with a caller path landing on the aggregate"
         id: shared-onto-aggregate
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -456,7 +452,7 @@ jobs:
       # reach the report: the report pass has to lift the property, or
       # it exits zero having written no XML at all.
       - name: "Build the fixture reactor with JaCoCo skipped by property"
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -475,7 +471,7 @@ jobs:
       # produced no data, so a gate that mistakes a declared plugin for a
       # running one would break an ordinary project.
       - name: "Build the fixture reactor with the agent skipped"
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -510,7 +506,7 @@ jobs:
 
       - name: "Build the fixture reactor without running tests"
         id: no-tests
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -533,7 +529,7 @@ jobs:
 
       # jacoco-mode off leaves the build exactly as it was.
       - name: "Build the fixture reactor with aggregation off"
-        uses: ./
+        uses: $/.
         with:
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean verify"
@@ -567,7 +563,7 @@ jobs:
 
       # yamllint disable-line rule:line-length
       - name: "Test failure: Invalid path_prefix"
-        uses: ./
+        uses: $/.
         id: failure-test
         continue-on-error: true
         with:
