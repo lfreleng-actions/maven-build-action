@@ -543,6 +543,49 @@ jobs:
           ./tests/check-subproject-coverage.sh \
             tests/fixtures/multi-subproject expect-none
 
+  test-m2repo-contract:
+    name: "Test m2repo Contract"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A SNAPSHOT merge lane seeds the maven-metadata.xml Nexus already
+      # publishes into m2repo before calling the action, so the deploy
+      # continues the buildNumber sequence instead of restarting at 1.
+      # Anything that clears m2repo first breaks that numbering without
+      # failing the build, hence a test of its own.
+      - name: "Seed m2repo before the build"
+        shell: bash
+        run: ./tests/m2repo-contract.sh seed "$GITHUB_WORKSPACE/m2repo"
+
+      - name: "Deploy the fixture reactor onto the seeded m2repo"
+        id: deploy
+        uses: $/.
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean deploy"
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      - name: "Check the deploy kept and continued the seeded m2repo"
+        shell: bash
+        env:
+          M2REPO_PATH: ${{ steps.deploy.outputs.m2repo_path }}
+        run: |
+          ./tests/m2repo-contract.sh check \
+            "$GITHUB_WORKSPACE/m2repo" "$M2REPO_PATH"
+
   test-failure-scenarios:
     name: "Test Build Failure"
     runs-on: ubuntu-latest
