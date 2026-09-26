@@ -384,9 +384,11 @@ This action performs the following steps:
 1. **Setup Java**: Configures the specified JDK version and distribution using `actions/setup-java`
 2. **Setup Maven**: Installs the specified Maven version using `s4u/setup-maven-action`
 3. **Export Environment Variables**: Exports GitHub variables as environment
-   variables using `infovista-opensource/vars-to-env-action`
+   variables using `infovista-opensource/vars-to-env-action`; skipped when
+   `env-vars` holds an empty string or `{}`
 4. **Export Environment Secrets**: Exports GitHub secrets as environment
-   variables using `infovista-opensource/vars-to-env-action`
+   variables using `infovista-opensource/vars-to-env-action`; skipped when
+   `env-secrets` holds an empty string or `{}`
 5. **Build with Maven**: Executes the Maven build with the specified phases,
    options, and parameters
 6. **Generate JaCoCo Badge**: Creates coverage badges and summary (if JaCoCo
