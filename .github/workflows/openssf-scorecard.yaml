@@ -29,6 +29,10 @@ jobs:
     name: "OpenSSF Scorecard"
     # yamllint disable-line rule:line-length
     uses: lfit/releng-reusable-workflows/.github/workflows/reuse-openssf-scorecard.yaml@87eacd1f8322263ebbc1411ce2ea82bab10ed091  # v0.10.3
+    # branch_protection_rule is a low-trust trigger, and a reusable
+    # workflow call can request cache writes despite that trigger's
+    # read-only default. The scan uses no cache, so cap it at read.
+    cache-mode: read
     permissions:
       contents: read  # Read repository contents (checkout, etc.)
       # yamllint disable-line rule:line-length
