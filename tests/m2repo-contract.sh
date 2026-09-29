@@ -88,7 +88,8 @@ EOF
       FAILED=1
     fi
 
-    if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$MARKER_TEXT" ]; then
+    if [ -f "$MARKER" ] \
+        && printf '%s\n' "$MARKER_TEXT" | cmp -s - "$MARKER"; then
       echo 'Content seeded before the build survived the deploy ✅'
     else
       echo "The seeded marker at ${MARKER} is gone or altered ❌" >&2
