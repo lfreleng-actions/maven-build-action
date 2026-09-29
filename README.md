@@ -157,6 +157,43 @@ The action also:
 Downstream publish/stage actions consume the built `m2repo` via the
 `m2repo_path` output; the calling workflow typically uploads it between jobs.
 
+### Deployment repository (m2repo) contract
+
+Callers may rely on the following behaviour, which the
+`test-m2repo-contract` job in `.github/workflows/testing.yaml` holds in
+place:
+
+- **Fixed path.** Maven deploys to `${GITHUB_WORKSPACE}/m2repo`, through
+  `-DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo`
+  on the `mvn` command line, and the action reports that path as the
+  `m2repo_path` output.
+- **Existing contents are not cleared.** The action never empties or
+  removes an existing `m2repo` before or after Maven runs. `mvn clean`
+  does not reach it either, since it sits outside every `target/`
+  directory. The deploy writes into the existing tree: files at paths it
+  does not produce stay as they were, while Maven rewrites the
+  `maven-metadata.xml` of each coordinate it deploys, continuing from
+  what that file already records, and overwrites any file at a path it
+  writes. Treat `m2repo` as a tree the deploy updates in place, not as a
+  store it adds to without touching what is there.
+
+The second point is what lets a SNAPSHOT merge lane keep counting. Such
+a lane seeds the `maven-metadata.xml` files Nexus already publishes into
+`${GITHUB_WORKSPACE}/m2repo` before calling this action with `deploy`.
+`maven-deploy-plugin` reads the seeded `buildNumber` and continues from
+it, so a module Nexus holds at build 41 deploys as build 42 rather than
+restarting at 1. A change that cleared `m2repo` before the build would
+break that numbering without failing the build.
+
+A seeding step necessarily writes to the fixed path, because it runs
+before the action does. Everything that reads the build output afterwards
+should take its location from the `m2repo_path` output rather than
+assuming a directory. A caller that passes its own
+`-DaltDeploymentRepository` in `mvn-opts` or `mvn-params` overrides the
+action's, since Maven honours the last repeated `-D`. The deploy then
+lands elsewhere while `m2repo_path` still reports the fixed path, so
+this contract holds for callers that leave that property alone.
+
 ### Coverage across Maven subprojects (jacoco-mode)
 
 A Maven build with subprojects runs the JaCoCo agent once per subproject, and
