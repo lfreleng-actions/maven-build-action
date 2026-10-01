@@ -18,13 +18,21 @@
 # core's next deploy to carry the following buildNumber, and the action
 # to report the path it deployed to.
 #
+# decoy writes a .mvn/maven.config into the project pointing all three
+# deploy-repository properties at another directory, as a project's own
+# configuration could. Maven reads that file before the command line,
+# and on its own it does redirect the deploy, so check's optional
+# fourth argument then requires that directory to stay empty: the
+# action's own deploy repository has to win.
+#
 # Usage:
 #   m2repo-contract.sh seed <m2repo-dir>
-#   m2repo-contract.sh check <m2repo-dir> <reported-m2repo-path>
+#   m2repo-contract.sh decoy <project-dir> <decoy-dir>
+#   m2repo-contract.sh check <m2repo-dir> <reported-m2repo-path> [<decoy-dir>]
 
 set -euo pipefail
 
-MODE="${1:?mode: seed or check}"
+MODE="${1:?mode: seed, decoy or check}"
 M2REPO="${2:?m2repo directory}"
 
 SEEDED_BUILD_NUMBER=41
@@ -76,10 +84,35 @@ EOF
     echo "Seeded ${M2REPO} with core buildNumber ${SEEDED_BUILD_NUMBER}"
     ;;
 
+  decoy)
+    # M2REPO holds the project directory in this mode.
+    DECOY="${3:?decoy directory}"
+    mkdir -p "${M2REPO}/.mvn"
+    for property in altDeploymentRepository \
+      altSnapshotDeploymentRepository altReleaseDeploymentRepository; do
+      printf -- '-D%s=decoy::default::file:%s\n' "$property" "$DECOY"
+    done > "${M2REPO}/.mvn/maven.config"
+    echo "Wrote ${M2REPO}/.mvn/maven.config redirecting the deploy" \
+      "to ${DECOY}"
+    ;;
+
   check)
     REPORTED="${3:?reported m2repo path}"
+    DECOY="${4:-}"
     EXPECTED_BUILD_NUMBER=$((SEEDED_BUILD_NUMBER + 1))
     FAILED=0
+
+    if [ -n "$DECOY" ]; then
+      DECOYED="$(find "$DECOY" -type f 2>/dev/null || true)"
+      if [ -z "$DECOYED" ]; then
+        echo "Nothing deployed to the decoy ${DECOY} ✅"
+      else
+        echo "The deploy reached the decoy ${DECOY} ❌" >&2
+        echo 'A deploy repository from .mvn/maven.config won.' >&2
+        printf '%s\n' "$DECOYED" >&2
+        FAILED=1
+      fi
+    fi
 
     if [ "$REPORTED" = "$M2REPO" ]; then
       echo "m2repo_path reports ${REPORTED} ✅"

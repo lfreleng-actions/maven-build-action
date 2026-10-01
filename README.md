@@ -76,8 +76,11 @@ steps:
 -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
 -Dmaven.repo.local=/tmp/r
 -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
--DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo
 ```
+
+Setting `mvn-opts` replaces these. The deploy repository is not among them:
+the build sets it separately, and a caller cannot replace or override it.
+See [Deployment repository (m2repo) contract](#deployment-repository-m2repo-contract).
 
 ### Workspace Variables in Maven Arguments
 
@@ -163,10 +166,13 @@ Callers may rely on the following behaviour, which the
 `test-m2repo-contract` job in `.github/workflows/testing.yaml` holds in
 place:
 
-- **Fixed path.** Maven deploys to `${GITHUB_WORKSPACE}/m2repo`, through
-  `-DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo`
-  on the `mvn` command line, and the action reports that path as the
-  `m2repo_path` output.
+- **Fixed path.** Maven deploys to `${GITHUB_WORKSPACE}/m2repo`, and the
+  action reports that path as the `m2repo_path` output. The build sets all
+  three deploy-repository properties `maven-deploy-plugin` reads, after
+  every caller argument:
+  `altDeploymentRepository`, `altSnapshotDeploymentRepository` and
+  `altReleaseDeploymentRepository`, each
+  `staging::default::file:${GITHUB_WORKSPACE}/m2repo`.
 - **Existing contents are not cleared.** The action never empties or
   removes an existing `m2repo` before or after Maven runs. `mvn clean`
   does not reach it either, since it sits outside every `target/`
@@ -188,11 +194,59 @@ break that numbering without failing the build.
 A seeding step necessarily writes to the fixed path, because it runs
 before the action does. Everything that reads the build output afterwards
 should take its location from the `m2repo_path` output rather than
-assuming a directory. A caller that passes its own
-`-DaltDeploymentRepository` in `mvn-opts` or `mvn-params` overrides the
-action's, since Maven honours the last repeated `-D`. The deploy then
-lands elsewhere while `m2repo_path` still reports the fixed path, so
-this contract holds for callers that leave that property alone.
+assuming a directory.
+
+#### Callers cannot redirect the deploy
+
+The action **refuses** any of the three properties in the arguments a
+caller supplies: `mvn-phases`, `mvn-profiles`, `mvn-opts`, `mvn-params` and
+`MAVEN_ARGS`. It fails before Maven runs, with an error naming the source
+and the property. Otherwise the action would ignore a caller's request for
+a different deploy repository without notice. Every spelling Maven accepts
+counts: `-Dname=value`, `-D name=value`, `--define name=value`,
+`--define=name=value`, and `-Dname` alone. That includes the two-word forms
+split across inputs, such as `mvn-opts` ending in `-D` with `mvn-params`
+starting with the property: the build passes them as adjacent arguments,
+which Maven reads as one.
+
+The action also refuses any caller argument that **begins with a double
+quote**. Maven 3.9 rewrites such arguments before reading them: it strips
+the quotes from `"-Dname=value"`, and an opening quote never closed joins
+every later argument into one value, including the action's own deploy
+repository. Together those could set the deploy repository and absorb the
+action's, defeating both the refusal and the ordering. The action allows a
+double quote anywhere else in an argument, and a single quote anywhere:
+Maven passes those through unchanged. Quoting was never a working way to
+pass a value holding a space either: Maven 3.9.16 rejoins `"-Dx=a b"` as
+`a b"`, keeping the closing quote.
+
+The action also turns **pathname expansion off** around its `mvn` calls.
+The caller inputs reach Maven as whitespace-separated words, and the shell
+would otherwise replace a pattern such as `*harmless*` with the names of
+matching files in the checkout, after the check above has run. A file named
+`"-Dname=value` would then turn back into a refused argument. With it off,
+Maven receives the same words the check read; a pattern Maven should see,
+such as `-Dtest=*IT`, passes through unchanged. `MAVEN_ARGS` is the
+exception: Maven's own launcher expands it unquoted, out of the action's
+reach, so the action refuses a pattern in `MAVEN_ARGS` that matches files
+where Maven starts. One that matches nothing still passes.
+
+Setting all three, last, is what makes the path hold. Maven honours the
+last value it reads for a property, and `maven-deploy-plugin` lets the
+snapshot and release properties outrank `altDeploymentRepository` whatever
+the argument order. Setting that one alone, even last, would leave both as
+a way round it. The ordering also wins over a project's
+`.mvn/maven.config`, which Maven reads before the command line; the action
+does not refuse that file, as it is the project's own configuration rather
+than a caller argument.
+
+One route stays open, and no command line can close it: a project POM that
+sets `<altSnapshotDeploymentRepository>` or `<altReleaseDeploymentRepository>`
+as a fixed value in the deploy plugin's `<configuration>`. A value written in
+the POM takes precedence over a `-D` user property, which fills a parameter
+the POM leaves unset and no other. That is the project's build
+configuration, not a caller argument. Remove it from a project that
+publishes through this action.
 
 ### Coverage across Maven subprojects (jacoco-mode)
 
