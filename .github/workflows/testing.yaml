@@ -144,6 +144,13 @@ jobs:
         shell: bash
         run: ./tests/expand-workspace-vars.sh
 
+      # Which arguments count as a caller's own deploy repository. Too
+      # narrow lets one redirect the deploy; too wide refuses an
+      # unrelated property and breaks a legitimate build.
+      - name: "Check deploy-repository detection"
+        shell: bash
+        run: ./tests/deploy-repository.sh
+
   test-jacoco-mode:
     name: "Test JaCoCo Mode Resolution"
     runs-on: ubuntu-latest
@@ -569,6 +576,15 @@ jobs:
         shell: bash
         run: ./tests/m2repo-contract.sh seed "$GITHUB_WORKSPACE/m2repo"
 
+      # A project's .mvn/maven.config is read before the command line,
+      # and on its own it redirects the deploy. The action's deploy
+      # repository must win over it all the same.
+      - name: "Point the project's .mvn/maven.config elsewhere"
+        shell: bash
+        run: |
+          ./tests/m2repo-contract.sh decoy \
+            tests/fixtures/multi-subproject "$RUNNER_TEMP/decoy"
+
       - name: "Deploy the fixture reactor onto the seeded m2repo"
         id: deploy
         uses: $/
@@ -584,7 +600,155 @@ jobs:
           M2REPO_PATH: ${{ steps.deploy.outputs.m2repo_path }}
         run: |
           ./tests/m2repo-contract.sh check \
-            "$GITHUB_WORKSPACE/m2repo" "$M2REPO_PATH"
+            "$GITHUB_WORKSPACE/m2repo" "$M2REPO_PATH" "$RUNNER_TEMP/decoy"
+
+  test-deploy-repository-refusal:
+    name: "Test Deploy Repository Refusal"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The control: same fixture, same setup, no override. It has to
+      # succeed, so that the failure below can only come from the
+      # override and not from anything else about this job.
+      - name: "Control: the same build without an override"
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "validate"
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      # altSnapshotDeploymentRepository rather than the generic
+      # property: the fixture is a SNAPSHOT, where this one would win
+      # even with the action's altDeploymentRepository placed last.
+      # ${RUNNER_TEMP} is left for the action to expand, so the guard
+      # is seen checking the argument Maven would receive.
+      - name: "Pass a deploy repository in mvn-params"
+        id: refused
+        continue-on-error: true
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean deploy"
+          # yamllint disable-line rule:line-length
+          mvn-params: "-DaltSnapshotDeploymentRepository=x::default::file:${RUNNER_TEMP}/decoy"
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      - name: "Check the action refused it before deploying"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.refused.outcome }}
+        run: |
+          FAILED=0
+          if [ "$OUTCOME" = "failure" ]; then
+            echo "The action refused the override ✅"
+          else
+            echo "The action did not fail: outcome '${OUTCOME}' ❌"
+            FAILED=1
+          fi
+          # Refused before the deploy: neither the requested directory
+          # nor m2repo received anything.
+          for dir in "$RUNNER_TEMP/decoy" "$GITHUB_WORKSPACE/m2repo"; do
+            if [ -n "$(find "$dir" -type f 2>/dev/null || true)" ]; then
+              echo "${dir} received a deploy ❌"
+              FAILED=1
+            else
+              echo "Nothing deployed to ${dir} ✅"
+            fi
+          done
+          exit "$FAILED"
+
+      # Maven 3.9 strips the quotes from a word beginning with one and
+      # joins an unterminated quote with every word after it. Quoted,
+      # the override below is a word the -D check does not recognise;
+      # the unterminated quote after it then absorbs the action's own
+      # deploy arguments, which come later on the line. Without the
+      # refusal this deploys to the decoy, verified against Maven 3.9.16.
+      - name: "Pass a quoted override that would absorb the action's own"
+        id: quoted
+        continue-on-error: true
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean deploy"
+          # yamllint disable-line rule:line-length
+          mvn-params: '"-DaltSnapshotDeploymentRepository=x::default::file:${RUNNER_TEMP}/quoted" "-Dharmless=value'
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      - name: "Check the action refused the quoted override"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.quoted.outcome }}
+        run: |
+          FAILED=0
+          if [ "$OUTCOME" = "failure" ]; then
+            echo "The action refused the quoted override ✅"
+          else
+            echo "The action did not fail: outcome '${OUTCOME}' ❌"
+            FAILED=1
+          fi
+          for dir in "$RUNNER_TEMP/quoted" "$GITHUB_WORKSPACE/m2repo"; do
+            if [ -n "$(find "$dir" -type f 2>/dev/null || true)" ]; then
+              echo "${dir} received a deploy ❌"
+              FAILED=1
+            else
+              echo "Nothing deployed to ${dir} ✅"
+            fi
+          done
+          exit "$FAILED"
+
+      # A caller pattern the guard reads as harmless, beside files in
+      # the checkout named as the quoted arguments Maven rewrites. With
+      # pathname expansion on, the build would expand the patterns into
+      # those names after the guard had run: the first redirects the
+      # deploy to ./globbed, the second absorbs the action's own deploy
+      # arguments. With it off, Maven receives the patterns literally
+      # and rejects them as unknown phases, so the build fails; what
+      # matters is where nothing lands.
+      - name: "Plant files named as quoted overrides"
+        shell: bash
+        run: |
+          : > '"-DaltSnapshotDeploymentRepository=x::default::file:globbed'
+          : > '"-Dharmless=value'
+
+      - name: "Pass patterns matching those files"
+        id: globbed
+        continue-on-error: true
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean deploy"
+          mvn-params: "*altSnapshot* *harmless*"
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      - name: "Check the patterns reached Maven unexpanded"
+        shell: bash
+        run: |
+          FAILED=0
+          for dir in "$GITHUB_WORKSPACE/globbed" "$GITHUB_WORKSPACE/m2repo"; do
+            if [ -n "$(find "$dir" -type f 2>/dev/null || true)" ]; then
+              echo "${dir} received a deploy ❌"
+              FAILED=1
+            else
+              echo "Nothing deployed to ${dir} ✅"
+            fi
+          done
+          exit "$FAILED"
 
   test-failure-scenarios:
     name: "Test Build Failure"

@@ -161,6 +161,97 @@ runs:
       with:
         secrets: ${{ inputs.env-secrets }}
 
+    - name: 'Refuse a caller deploy repository'
+      shell: bash
+      env:
+        MVN_PHASES: ${{ inputs.mvn-phases }}
+        MVN_PROFILES: ${{ inputs.mvn-profiles }}
+        MVN_OPTS: ${{ inputs.mvn-opts }}
+        MVN_PARAMS: ${{ inputs.mvn-params }}
+        # Whether one is set, never its content: the settings document
+        # carries credentials, and only its position on the command
+        # line matters here.
+        HAS_GLOBAL_SETTINGS: ${{ inputs.global-settings != '' }}
+      run: |
+        # The build deploys into ${GITHUB_WORKSPACE}/m2repo and reports
+        # that path as m2repo_path. The build step sets the deploy
+        # repository after every caller argument, so a caller's own
+        # never takes effect. Refuse one here rather than ignore it
+        # without a word: the caller asked for something this action
+        # will not do, and should hear so before Maven runs.
+        #
+        # Runs after the env exports, so a MAVEN_ARGS that env-vars or
+        # env-secrets injected is checked too, and before the first mvn
+        # call. .mvn/maven.config is the project's own configuration
+        # rather than a caller argument, so it is not refused; the
+        # build's ordering overrides it all the same.
+        # shellcheck source=expand-workspace-vars.sh
+        . "$GITHUB_ACTION_PATH/expand-workspace-vars.sh"
+        # shellcheck source=deploy-repository.sh
+        . "$GITHUB_ACTION_PATH/deploy-repository.sh"
+
+        # Every caller source the build expands unquoted onto the mvn
+        # command line, in the order Maven receives them: MAVEN_ARGS,
+        # which Maven prepends itself, then the build step's own line.
+        # The action's fixed arguments sit between them, labelled "-",
+        # since what surrounds a source decides what a trailing -D in it
+        # joins. Keep this in step with the build's mvn command.
+        # mvn-opts and mvn-params are checked as Maven receives them,
+        # after the workspace-variable expansion the build applies.
+        SOURCES=(
+          MAVEN_ARGS "${MAVEN_ARGS:-}"
+          mvn-phases "$MVN_PHASES"
+          - "-f pom.xml -e"
+        )
+        if [ "$HAS_GLOBAL_SETTINGS" = "true" ]; then
+          SOURCES+=(- "--global-settings settings.xml")
+        fi
+        if [ -n "$MVN_PROFILES" ]; then
+          SOURCES+=(- "-P" mvn-profiles "$MVN_PROFILES")
+        fi
+        SOURCES+=(
+          mvn-opts "$(expand_workspace_vars "$MVN_OPTS")"
+          mvn-params "$(expand_workspace_vars "$MVN_PARAMS")"
+        )
+
+        if found="$(find_caller_deploy_repository "${SOURCES[@]}")"; then
+          source="${found%%$'\t'*}"
+          what="${found#*$'\t'}"
+          if [ "$what" = "$DEPLOY_REPOSITORY_QUOTE" ]; then
+            # The argument itself is not echoed: these inputs can carry
+            # credentials.
+            echo "::error::Found an argument beginning with a double" \
+              "quote in ${source}. Maven strips and joins such arguments" \
+              "before reading them, which can set or absorb the deploy" \
+              "repository this action fixes, so the action refuses them." \
+              "Pass the argument unquoted."
+          else
+            echo "::error::Found ${what} in ${source}. This action deploys" \
+              "into \${GITHUB_WORKSPACE}/m2repo and reports it as" \
+              "m2repo_path; publish from there instead of redirecting" \
+              "the deploy."
+          fi
+          exit 1
+        fi
+
+        # The action turns pathname expansion off around its own mvn
+        # calls, so the inputs above reach Maven as checked. MAVEN_ARGS
+        # is the exception: Maven's launcher script expands it unquoted
+        # itself, where the action cannot reach, so a pattern in it
+        # that matches a file in the checkout reaches Maven as that
+        # file's name, unchecked. Refuse such a pattern; one matching
+        # nothing passes through unchanged. Checked from the directory
+        # mvn starts in, which is this step's.
+        if has_globbing_word "${MAVEN_ARGS:-}"; then
+          echo "::error::MAVEN_ARGS holds a pathname pattern that" \
+            "matches files in ${PWD}. Maven's launcher expands" \
+            "MAVEN_ARGS unquoted, so those file names would reach Maven" \
+            "in its place, unchecked. Escape the pattern or pass it in" \
+            "mvn-params, where the action does not expand it."
+          exit 1
+        fi
+        echo "No caller deploy repository; the build deploys into m2repo ✅"
+
     - name: 'Resolve JaCoCo coverage mode'
       id: jacoco-mode
       shell: bash
@@ -416,11 +507,18 @@ runs:
         # successful run. Verified against Maven 3.9.9: stdout under -q
         # is 0 bytes, while -Doutput writes the document regardless.
         EPOM_FILE="$(mktemp)"
+        # Pathname expansion off for the unquoted arguments, as in the
+        # build: a pattern matching a file in the checkout would
+        # otherwise reach Maven as that file's name, which the deploy
+        # repository guard never saw, and the probe would also read
+        # different arguments from the build.
+        set -f
         # shellcheck disable=SC2086
         mvn --batch-mode --no-transfer-progress -q \
           -f "$PATH_PREFIX/$MVN_POM_FILE" $PROBE_ARGS \
           help:effective-pom -Doutput="$EPOM_FILE" >/dev/null 2>&1 \
           || : > "$EPOM_FILE"
+        set +f
 
         # No JaCoCo agent means no execution data exists to share and
         # nothing downstream to fix. Aggregating here would leave the
@@ -1187,13 +1285,41 @@ runs:
         MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
         MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
 
+        # The deploy repository, set for all three properties
+        # maven-deploy-plugin reads, and placed after every caller
+        # argument. Maven honours the last value it reads for a property,
+        # and the snapshot and release properties outrank
+        # altDeploymentRepository whatever the order, so setting that one
+        # alone, even last, would leave both as a way round it. This
+        # holds against MAVEN_ARGS and .mvn/maven.config too, which Maven
+        # reads before the command line. An array keeps each argument
+        # whole if the workspace path holds a space.
+        # shellcheck source=deploy-repository.sh
+        . "$GITHUB_ACTION_PATH/deploy-repository.sh"
+        DEPLOY_ARGS=()
+        while IFS= read -r arg; do
+          DEPLOY_ARGS+=("$arg")
+        done < <(deploy_repository_args "${GITHUB_WORKSPACE}/m2repo")
+
+        # The 'Refuse a caller deploy repository' step mirrors the order
+        # of the caller sources on this line. Change one, change both.
+        #
+        # Pathname expansion off for the unquoted arguments. A caller's
+        # *pattern* matching a file in the checkout would otherwise
+        # reach Maven as that file's name: one named '"-Dname=value'
+        # becomes the quoted argument the guard refuses, after the guard
+        # has run. With it off, Maven receives exactly the words the
+        # guard checked.
+        set -f
         mvn $MVN_PHASES \
             -f "$PATH_PREFIX/$MVN_POM_FILE" \
             -e \
             $GLOBAL_SETTINGS_ARG \
             $PROFILES_ARG \
-            -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo \
-            $MVN_OPTS $MVN_PARAMS $JACOCO_ARGS
+            $MVN_OPTS $MVN_PARAMS \
+            "${DEPLOY_ARGS[@]}" \
+            $JACOCO_ARGS
+        set +f
         # JACOCO_ARGS last on purpose. Maven honours the last repeated
         # -D, verified against 3.9.9: -Dfoo=first -Dfoo=second resolves
         # to second. These arguments only exist where the resolver has
@@ -1507,6 +1633,7 @@ runs:
         MVN_PARAMS="$(expand_workspace_vars "$MVN_PARAMS")"
         MVN_OPTS="$(expand_workspace_vars "$MVN_OPTS")"
 
+        set -f
         # shellcheck disable=SC2086
         mvn --batch-mode --no-transfer-progress \
           -f "$PATH_PREFIX/$MVN_POM_FILE" $PROFILES_ARG \
@@ -1515,6 +1642,7 @@ runs:
           org.jacoco:jacoco-maven-plugin:report \
           -Djacoco.skip=false \
           -Djacoco.dataFile="$DATA_FILE"
+        set +f
         # -Djacoco.skip=false because a POM property of jacoco.skip
         # reaches this report the same way it reaches the build, and a
         # project that skips JaCoCo by property while an execution turns
