@@ -149,9 +149,10 @@ jobs:
 
   ### Test failure scenarios ###
   # With 'setup-java' off the action must leave the caller's JDK alone,
-  # whatever java-version says, and still write the settings.xml that
-  # actions/setup-java would have. s4u/setup-maven-action used to install
-  # a second JDK here regardless.
+  # whatever java-version says, and still write ~/.m2/settings.xml.
+  # s4u/setup-maven-action used to install a second JDK here regardless.
+  # The caller's Maven is the version asked for, so the action must use
+  # it rather than download another.
   test-setup-java-disabled:
     name: "Test Caller-Supplied JDK"
     runs-on: ubuntu-latest
@@ -181,12 +182,31 @@ jobs:
         shell: bash
         run: rm -f "${HOME}/.m2/settings.xml"
 
+      # Outside the tool cache, where stCarolas/setup-maven would install
+      # its own copy and put that first on PATH.
+      - name: "Install the caller's Maven"
+        shell: bash
+        env:
+          # yamllint disable rule:line-length
+          MAVEN_URL: "https://archive.apache.org/dist/maven/maven-3/3.9.11/binaries/apache-maven-3.9.11-bin.tar.gz"
+          MAVEN_SHA512: "bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978"
+          # yamllint enable rule:line-length
+        run: |
+          # Install the caller's Maven
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/maven.tar.gz"
+          curl -sSfL --retry 3 -o "${archive}" "${MAVEN_URL}"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --quiet
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-3.9.11/bin" >> "$GITHUB_PATH"
+
       # A different java-version, so a JDK installed here would show.
       - name: "Build with setup-java off"
         uses: $/
         with:
           setup-java: 'false'
           java-version: '17'
+          mvn-version: '3.9.11'
           path_prefix: "tests/fixtures/multi-subproject"
           mvn-phases: "clean package"
           run-jacoco: "false"
@@ -212,7 +232,14 @@ jobs:
             echo "::error::~/.m2/settings.xml lacks the github server"
             exit 1
           fi
-          echo "Caller's JDK kept and Maven settings written ✅"
+          mvn_path=$(command -v mvn)
+          echo "mvn=${mvn_path}"
+          caller_mvn="${RUNNER_TEMP}/apache-maven-3.9.11/bin/mvn"
+          if [ "${mvn_path}" != "${caller_mvn}" ]; then
+            echo "::error::mvn is not the caller's; Maven was downloaded again"
+            exit 1
+          fi
+          echo "Caller's JDK and Maven kept, settings written ✅"
 
   ### Test failure scenarios ###
   test-argument-expansion:

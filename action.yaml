@@ -139,45 +139,46 @@ runs:
         java-version: ${{ inputs.java-version }}
         distribution: ${{ inputs.distribution }}
 
-    # Maven only, not s4u/setup-maven-action: that action runs
-    # actions/setup-java again with its own default distribution (zulu),
-    # so builds ran on Zulu whatever 'distribution' asked for, and it
-    # installed Java even with 'setup-java' off. The rest of what it
-    # wraps added nothing here: the checkout was disabled, its
-    # settings.xml repeated the one actions/setup-java writes, and its
-    # ~/.m2/repository cache never saved, the default mvn-opts keeping
-    # the local repository in /tmp/r.
+    # Maven and its settings directly, not through s4u/setup-maven-action:
+    # that action runs actions/setup-java again with its own default
+    # distribution (zulu), so builds ran on Zulu whatever 'distribution'
+    # asked for, and it installed Java even with 'setup-java' off. The
+    # steps below keep the rest of what it did: download Maven only when
+    # the one on PATH is not the version asked for, and write
+    # ~/.m2/settings.xml through s4u/maven-settings-action, whose post-job
+    # cleanup removes the file again so a persistent runner keeps nothing.
+    # Its ~/.m2/repository cache is not kept: it never saved, the default
+    # mvn-opts keeping the local repository in /tmp/r.
+    - name: 'Check installed Maven'
+      id: maven-installed
+      shell: bash
+      run: |
+        # Report the Maven version on PATH, empty when there is none
+        # pipefail, declared rather than left to the runner's shell
+        # template: without it a failing mvn that prints the version would
+        # pass for a usable one, and the setup step below would be skipped.
+        set -euo pipefail
+        version=""
+        if command -v mvn >/dev/null 2>&1; then
+          # One bare version line, as 'mvn -q -v' prints; anything else
+          # cannot match the input, and the download below goes ahead.
+          version=$(mvn -q -v 2>/dev/null | tr -d '\r\n') || version=""
+        fi
+        echo "Installed Maven: ${version:-none}"
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+
     - name: 'Setup Maven'
+      if: ${{ steps.maven-installed.outputs.version != inputs.mvn-version }}
       # yamllint disable-line rule:line-length
       uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
       with:
         maven-version: ${{ inputs.mvn-version }}
 
-    # actions/setup-java writes ~/.m2/settings.xml with a 'github' server
-    # for GitHub Packages. s4u/setup-maven-action wrote the same file even
-    # with 'setup-java' off, so callers that bring their own JDK keep it.
     - name: 'Write Maven settings'
-      if: ${{ inputs.setup-java != 'true' }}
-      shell: bash
-      run: |
-        # Write ~/.m2/settings.xml as actions/setup-java would
-        set -euo pipefail
-        mkdir -p "${HOME}/.m2"
-        cat > "${HOME}/.m2/settings.xml" <<'SETTINGS'
-        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-            https://maven.apache.org/xsd/settings-1.0.0.xsd">
-          <interactiveMode>false</interactiveMode>
-          <servers>
-            <server>
-              <id>github</id>
-              <username>${env.GITHUB_ACTOR}</username>
-              <password>${env.GITHUB_TOKEN}</password>
-            </server>
-          </servers>
-        </settings>
-        SETTINGS
+      # yamllint disable-line rule:line-length
+      uses: s4u/maven-settings-action@894661b3ddae382f1ae8edbeab60987e08cf0788 # v4.0.0
+      with:
+        githubServer: 'true'
 
     - name: 'Export env variables'
       if: ${{ inputs.env-vars != '' && inputs.env-vars != '{}' }}

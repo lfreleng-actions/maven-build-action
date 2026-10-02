@@ -474,9 +474,12 @@ This action performs the following steps:
 
 1. **Setup Java**: Configures the specified JDK version and distribution
    using `actions/setup-java`; skipped when `setup-java` is `false`, which
-   leaves the caller's own JDK in place and writes the same
-   `~/.m2/settings.xml` that `actions/setup-java` would
-2. **Setup Maven**: Installs the specified Maven version using `stCarolas/setup-maven`
+   leaves the caller's own JDK in place
+2. **Setup Maven**: Installs the specified Maven version using
+   `stCarolas/setup-maven`, unless `mvn` on `PATH` already reports it, and
+   writes `~/.m2/settings.xml` with a `github` server for GitHub Packages
+   using `s4u/maven-settings-action`, which removes the file again when the
+   job ends
 3. **Export Environment Variables**: Exports GitHub variables as environment
    variables using `infovista-opensource/vars-to-env-action`; skipped when
    `env-vars` holds an empty string or `{}`
