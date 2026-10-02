@@ -112,12 +112,107 @@ jobs:
             -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
           # yamllint enable rule:line-length
 
+      # The build must run on the JDK and Maven the inputs ask for.
+      # Until s4u/setup-maven-action was dropped it installed a second
+      # JDK, its own default Zulu, after the requested Temurin one, so
+      # JAVA_HOME pointed at Zulu whatever 'distribution' said.
+      - name: "Verify the requested toolchain"
+        shell: bash
+        run: |
+          # Verify the requested toolchain
+          set -euo pipefail
+          echo "JAVA_HOME=${JAVA_HOME}"
+          case "${JAVA_HOME}" in
+            *Temurin*) ;;
+            *)
+              echo "::error::JAVA_HOME is not the default Temurin JDK"
+              exit 1
+              ;;
+          esac
+          mvn_version=$(mvn --version)
+          echo "${mvn_version}"
+          if ! grep -q '^Apache Maven 3\.9\.11 ' <<< "${mvn_version}"; then
+            echo "::error::mvn is not the requested Maven 3.9.11"
+            exit 1
+          fi
+          if ! grep -q "^Java version: 17\." <<< "${mvn_version}"; then
+            echo "::error::Maven does not run on the requested Java 17"
+            exit 1
+          fi
+
       - name: "Summary: maven-build-action"
         shell: bash
         run: |
           # Summary: maven-build-action
           echo "Test builds completed successfully ✅"
           echo "Test builds completed successfully ✅" >> "$GITHUB_STEP_SUMMARY"
+
+  ### Test failure scenarios ###
+  # With 'setup-java' off the action must leave the caller's JDK alone,
+  # whatever java-version says, and still write the settings.xml that
+  # actions/setup-java would have. s4u/setup-maven-action used to install
+  # a second JDK here regardless.
+  test-setup-java-disabled:
+    name: "Test Caller-Supplied JDK"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Set up the caller's JDK"
+        id: caller-jdk
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: "Remove the settings the caller's JDK step wrote"
+        shell: bash
+        run: rm -f "${HOME}/.m2/settings.xml"
+
+      # A different java-version, so a JDK installed here would show.
+      - name: "Build with setup-java off"
+        uses: $/
+        with:
+          setup-java: 'false'
+          java-version: '17'
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean package"
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      - name: "Check the caller's JDK and Maven settings"
+        shell: bash
+        env:
+          CALLER_JAVA_HOME: ${{ steps.caller-jdk.outputs.path }}
+        run: |
+          # Check the caller's JDK and Maven settings
+          set -euo pipefail
+          echo "JAVA_HOME=${JAVA_HOME}"
+          if [ "${JAVA_HOME}" != "${CALLER_JAVA_HOME}" ]; then
+            echo "::error::JAVA_HOME changed from ${CALLER_JAVA_HOME}"
+            exit 1
+          fi
+          if ! mvn --version | grep -q '^Java version: 21\.'; then
+            echo "::error::Maven does not run on the caller's Java 21"
+            exit 1
+          fi
+          if ! grep -q '<id>github</id>' "${HOME}/.m2/settings.xml"; then
+            echo "::error::~/.m2/settings.xml lacks the github server"
+            exit 1
+          fi
+          echo "Caller's JDK kept and Maven settings written ✅"
 
   ### Test failure scenarios ###
   test-argument-expansion:
