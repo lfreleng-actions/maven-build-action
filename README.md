@@ -472,8 +472,11 @@ with no aggregate scheduled keeps the fallback it always had.
 
 This action performs the following steps:
 
-1. **Setup Java**: Configures the specified JDK version and distribution using `actions/setup-java`
-2. **Setup Maven**: Installs the specified Maven version using `s4u/setup-maven-action`
+1. **Setup Java**: Configures the specified JDK version and distribution
+   using `actions/setup-java`; skipped when `setup-java` is `false`, which
+   leaves the caller's own JDK in place and writes the same
+   `~/.m2/settings.xml` that `actions/setup-java` would
+2. **Setup Maven**: Installs the specified Maven version using `stCarolas/setup-maven`
 3. **Export Environment Variables**: Exports GitHub variables as environment
    variables using `infovista-opensource/vars-to-env-action`; skipped when
    `env-vars` holds an empty string or `{}`

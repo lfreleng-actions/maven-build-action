@@ -27,7 +27,13 @@ trap 'rm -f "$LOGIC"' EXIT
 # action's shell options are part of what is under test: a command that
 # exits non-zero on a legitimate input aborts the real step, and a suite
 # running without those options reports success while the action fails.
-awk '/^        set -euo pipefail$/{f=1} f && /^    - name: /{exit} f{print}' \
+# Found by the step's name, since other steps set the same options, and
+# never read past that step: if it loses the line, the extraction comes
+# back empty and fails below rather than running a later step's script.
+awk '/^    - name: .Resolve JaCoCo coverage mode.$/{s=1; next}
+  s && /^    - name: /{exit}
+  s && /^        set -euo pipefail$/{f=1}
+  f{print}' \
   "$ACTION" | sed 's/^        //' > "$LOGIC"
 
 if [ ! -s "$LOGIC" ]; then

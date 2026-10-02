@@ -139,13 +139,45 @@ runs:
         java-version: ${{ inputs.java-version }}
         distribution: ${{ inputs.distribution }}
 
+    # Maven only, not s4u/setup-maven-action: that action runs
+    # actions/setup-java again with its own default distribution (zulu),
+    # so builds ran on Zulu whatever 'distribution' asked for, and it
+    # installed Java even with 'setup-java' off. The rest of what it
+    # wraps added nothing here: the checkout was disabled, its
+    # settings.xml repeated the one actions/setup-java writes, and its
+    # ~/.m2/repository cache never saved, the default mvn-opts keeping
+    # the local repository in /tmp/r.
     - name: 'Setup Maven'
       # yamllint disable-line rule:line-length
-      uses: s4u/setup-maven-action@4a02cbd99769e46198135c31d5097c94618ba3f5 # v1.21.0
+      uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
       with:
-        java-version: ${{ inputs.java-version }}
         maven-version: ${{ inputs.mvn-version }}
-        checkout-enabled: false # Perform prior to calling this action
+
+    # actions/setup-java writes ~/.m2/settings.xml with a 'github' server
+    # for GitHub Packages. s4u/setup-maven-action wrote the same file even
+    # with 'setup-java' off, so callers that bring their own JDK keep it.
+    - name: 'Write Maven settings'
+      if: ${{ inputs.setup-java != 'true' }}
+      shell: bash
+      run: |
+        # Write ~/.m2/settings.xml as actions/setup-java would
+        set -euo pipefail
+        mkdir -p "${HOME}/.m2"
+        cat > "${HOME}/.m2/settings.xml" <<'SETTINGS'
+        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+            https://maven.apache.org/xsd/settings-1.0.0.xsd">
+          <interactiveMode>false</interactiveMode>
+          <servers>
+            <server>
+              <id>github</id>
+              <username>${env.GITHUB_ACTOR}</username>
+              <password>${env.GITHUB_TOKEN}</password>
+            </server>
+          </servers>
+        </settings>
+        SETTINGS
 
     - name: 'Export env variables'
       if: ${{ inputs.env-vars != '' && inputs.env-vars != '{}' }}
@@ -1754,7 +1786,7 @@ runs:
       id: summary
       shell: bash
       env:
-        JAVA_VERSION: ${{ inputs.java-version }}
+        JAVA_VERSION_INPUT: ${{ inputs.java-version }}
         MVN_VERSION: ${{ inputs.mvn-version }}
         MVN_PHASES: ${{ inputs.mvn-phases }}
         MVN_PROFILES: ${{ inputs.mvn-profiles }}
@@ -1767,6 +1799,13 @@ runs:
       run: |
         # Summarise the build and publish action outputs
         set -euo pipefail
+
+        # The JVM Maven ran on, found the way Maven finds it. With
+        # 'setup-java' off that is the caller's, not java-version.
+        JAVA_BIN="${JAVA_HOME:+${JAVA_HOME}/bin/}java"
+        JAVA_VERSION=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1 \
+          | sed -n 's/^ *java\.version = //p' || true)
+        JAVA_VERSION="${JAVA_VERSION:-$JAVA_VERSION_INPUT}"
 
         M2REPO_PATH="${GITHUB_WORKSPACE}/m2repo"
         if [ -d "$M2REPO_PATH" ]; then
