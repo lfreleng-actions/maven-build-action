@@ -3,10 +3,10 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 #
 # The deployment repository (m2repo) the build deploys into, sourced by
-# the step that refuses a caller's own deploy repository and by the
+# the step that checks a caller's own deploy repository and by the
 # build step that sets it. One file, so the property list that step
-# refuses is the list the build sets; two copies could drift apart and
-# leave a property refused but not set, or set but not refused.
+# checks is the list the build sets; two copies could drift apart and
+# leave a property checked but not set, or set but not checked.
 #
 # maven-deploy-plugin reads three properties. The snapshot and release
 # ones take precedence over altDeploymentRepository whatever the
@@ -34,13 +34,48 @@ deploy_repository_args() {
   done <<< "$DEPLOY_REPOSITORY_PROPERTIES"
 }
 
-# find_deploy_repository_override <argument-string>
+# deploy_repository_targets <value> <directory>
+#
+# Return 0 when a deploy-repository value, the text after "name=",
+# names the file repository at the directory; return 1 otherwise. The
+# repository id and layout are ignored, since the build replaces the
+# whole value. Quote characters are dropped first: callers wrote
+# file:"${GITHUB_WORKSPACE}"/m2repo for years, expecting a shell to
+# remove them, and they meant the directory either way. Only an
+# absolute path counts; a relative one depends on where Maven starts.
+deploy_repository_targets() {
+  local value="$1" dir="$2" url
+  case "$value" in
+    *::*) ;;
+    *) return 1 ;;
+  esac
+  url="${value##*::}"
+  url="${url//\"/}"
+  url="${url//\'/}"
+  case "$url" in
+    file:/*) url="${url#file:}" ;;
+    *) return 1 ;;
+  esac
+  # file:///path is the same location as file:/path.
+  case "$url" in
+    ///*) url="${url#//}" ;;
+  esac
+  while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+  while [ "${dir%/}" != "$dir" ]; do dir="${dir%/}"; done
+  [ -n "$url" ] && [ "$url" = "$dir" ]
+}
+
+# find_deploy_repository_override <argument-string> [<m2repo-dir>]
 #
 # Print the first deploy-repository property the string sets, or
 # DEPLOY_REPOSITORY_QUOTE for a word beginning with a double quote,
 # and return 0; return 1 when it holds neither. The string is split on
 # whitespace, as the build's unquoted expansion splits it, so each
 # word is an argument Maven receives.
+#
+# Given a directory, a property whose value names it is passed over:
+# the build sets that same directory last, so the caller's copy
+# changes nothing. A leading double quote is reported regardless.
 #
 # Maven's command line accepts four spellings of a property, and only
 # these, with no abbreviated long options:
@@ -61,8 +96,9 @@ deploy_repository_args() {
 # shape that triggers it: a quote anywhere but the start of a word,
 # and a single quote anywhere, reach Maven unchanged.
 find_deploy_repository_override() {
+  local allow="${2-}"
   local -a words
-  local word name property count i
+  local word setting name property count i
   # -d '' reads the whole string rather than its first line, splitting
   # on spaces, tabs and newlines alike, as the build's unquoted
   # expansion does. A caller writing mvn-params as a YAML block puts
@@ -80,22 +116,27 @@ find_deploy_repository_override() {
     case "$word" in
       -D | --define)
         ((i + 1 < count)) || continue
-        name="${words[i + 1]}"
+        setting="${words[i + 1]}"
         # The value word of a two-word property is checked here, before
         # the loop skips past it: Maven strips its quotes too.
-        if [ "${name:0:1}" = '"' ]; then
+        if [ "${setting:0:1}" = '"' ]; then
           printf '%s\n' "$DEPLOY_REPOSITORY_QUOTE"
           return 0
         fi
         i=$((i + 1))
         ;;
-      --define=*) name="${word#--define=}" ;;
-      -D*) name="${word#-D}" ;;
+      --define=*) setting="${word#--define=}" ;;
+      -D*) setting="${word#-D}" ;;
       *) continue ;;
     esac
-    name="${name%%=*}"
+    name="${setting%%=*}"
     while IFS= read -r property; do
       if [ "$name" = "$property" ]; then
+        # -Dname alone sets "true", which names no directory.
+        if [ -n "$allow" ] && [ "$setting" != "$name" ] \
+            && deploy_repository_targets "${setting#*=}" "$allow"; then
+          continue 2
+        fi
         printf '%s\n' "$property"
         return 0
       fi
@@ -104,31 +145,38 @@ find_deploy_repository_override() {
   return 1
 }
 
-# find_caller_deploy_repository <label> <arguments> [<label> <arguments>]...
+# find_caller_deploy_repository [--allow <m2repo-dir>] <label> <arguments>
+#   [<label> <arguments>]...
 #
 # Print "<label><TAB><property>" for the first deploy-repository
 # property the arguments set, and return 0; return 1 when they set
 # none. Pass each source in the order the build passes it to Maven,
 # including the action's own fixed arguments between them, labelled
 # "-": the arguments either side of a source decide what it joins.
+# With --allow, a property naming that directory is passed over, as
+# find_deploy_repository_override describes.
 #
 # Each source is checked alone first, so the error names the one to
 # change. Then all of them together, as Maven receives them: a trailing
 # -D or --define in one source and a property name opening the next
 # form a single two-word property that neither holds alone.
 find_caller_deploy_repository() {
-  local label property all=''
+  local label property allow='' all=''
+  if [ "${1-}" = "--allow" ]; then
+    allow="$2"
+    shift 2
+  fi
   while [ "$#" -ge 2 ]; do
     label="$1"
     if [ "$label" != "-" ] \
-        && property="$(find_deploy_repository_override "$2")"; then
+        && property="$(find_deploy_repository_override "$2" "$allow")"; then
       printf '%s\t%s\n' "$label" "$property"
       return 0
     fi
     all="$all $2"
     shift 2
   done
-  if property="$(find_deploy_repository_override "$all")"; then
+  if property="$(find_deploy_repository_override "$all" "$allow")"; then
     printf '%s\t%s\n' "the caller arguments, split across two of them" \
       "$property"
     return 0

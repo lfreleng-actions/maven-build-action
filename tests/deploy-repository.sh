@@ -132,6 +132,93 @@ while IFS= read -r arg; do
   fi
 done < <(deploy_repository_args /w/m2repo)
 
+# deploy_repository_targets: whether a value names the m2repo. A caller
+# naming it asks for what the build does anyway, so the guard warns and
+# the build goes on; anything else stays refused.
+M=/w/m2repo
+targets() {
+  if deploy_repository_targets "$1" "$M"; then
+    echo "names the m2repo: ${1} ✅"
+  else
+    echo "not seen to name the m2repo: ${1} ❌"
+    FAILED=1
+  fi
+}
+misses() {
+  if deploy_repository_targets "$1" "$M"; then
+    echo "wrongly seen to name the m2repo: ${1:-<empty>} ❌"
+    FAILED=1
+  else
+    echo "does not name the m2repo: ${1:-<empty>} ✅"
+  fi
+}
+targets "staging::default::file:/w/m2repo"
+targets "x::file:/w/m2repo"
+targets "staging::default::file:/w/m2repo/"
+targets "staging::default::file:///w/m2repo"
+# The quoted form callers carried, as the action's expansion leaves it.
+targets 'staging::default::file:"/w"/m2repo'
+targets "staging::default::file:'/w'/m2repo"
+misses "staging::default::file:/elsewhere"
+misses "staging::default::file:/w/m2repo2"
+misses "staging::default::file:/w/m2repo/sub"
+misses "staging::default::file:/w"
+misses "staging::default::file:m2repo"
+misses "staging::default::https://example.org/w/m2repo"
+misses "file:/w/m2repo"
+misses "true"
+misses ""
+
+# With the m2repo allowed, a caller naming it passes in every spelling.
+allowed_m2repo() {
+  local found
+  if found="$(find_deploy_repository_override "$1" "$M")"; then
+    echo "wrongly refused ${found} naming the m2repo: ${1} ❌"
+    FAILED=1
+  else
+    echo "allowed naming the m2repo: ${1} ✅"
+  fi
+}
+refused_m2repo() {
+  local found
+  if found="$(find_deploy_repository_override "$1" "$M")" \
+      && [ "$found" = "$2" ]; then
+    echo "refused ${2} despite the allowance: ${1} ✅"
+  else
+    echo "expected ${2} refused, got '${found:-nothing}': ${1} ❌"
+    FAILED=1
+  fi
+}
+for p in altDeploymentRepository altSnapshotDeploymentRepository \
+  altReleaseDeploymentRepository; do
+  allowed_m2repo "-D${p}=staging::default::file:${M}"
+  allowed_m2repo "-D ${p}=staging::default::file:${M}"
+  allowed_m2repo "--define ${p}=staging::default::file:${M}"
+  allowed_m2repo "--define=${p}=staging::default::file:${M}"
+  # -Dname alone sets "true", which names no directory.
+  refused_m2repo "-D${p}" "$p"
+  refused_m2repo "-D${p}=${R}" "$p"
+done
+# What the build sets is allowed with the same directory.
+while IFS= read -r arg; do
+  allowed_m2repo "$arg"
+done < <(deploy_repository_args "$M")
+# lfit/releng-reusable-workflows' default mvn-opts, verbatim, through the
+# expansion the action applies: the quotes reach the guard intact.
+# shellcheck source=../expand-workspace-vars.sh disable=SC1091
+. "${SCRIPT_DIR}/../expand-workspace-vars.sh"
+# shellcheck disable=SC2016
+RELENG_OPTS='-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+-Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
+-DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo'
+allowed_m2repo "$(GITHUB_WORKSPACE=/w expand_workspace_vars "$RELENG_OPTS")"
+# The allowance covers one argument, never those after it.
+refused_m2repo "-DaltDeploymentRepository=staging::default::file:${M}
+-DaltSnapshotDeploymentRepository=${R}" altSnapshotDeploymentRepository
+# A leading double quote is refused whatever it names.
+refused_m2repo "\"-DaltDeploymentRepository=staging::default::file:${M}\"" \
+  "$DEPLOY_REPOSITORY_QUOTE"
+
 # find_caller_deploy_repository: sources in the build's order, the
 # action's fixed arguments labelled "-". The result names the source.
 attributed() {
@@ -202,6 +289,32 @@ if found="$(find_caller_deploy_repository \
 else
   echo "allowed clean sources in the build's order ✅"
 fi
+
+# --allow: sources naming the m2repo pass, including the two-word form
+# split across them; one naming anywhere else is still named.
+if found="$(find_caller_deploy_repository --allow "$M" \
+    mvn-opts "-DaltDeploymentRepository=staging::default::file:${M}" \
+    mvn-params "-D" - "-f pom.xml")"; then
+  echo "wrongly refused a source naming the m2repo: ${found} ❌"
+  FAILED=1
+else
+  echo "allowed a source naming the m2repo ✅"
+fi
+if found="$(find_caller_deploy_repository --allow "$M" \
+    mvn-opts "-D" mvn-params "altDeploymentRepository=x::file:${M}")"; then
+  echo "wrongly refused a split property naming the m2repo: ${found} ❌"
+  FAILED=1
+else
+  echo "allowed a split property naming the m2repo ✅"
+fi
+attributed "mvn-params${TAB}altReleaseDeploymentRepository" \
+  --allow "$M" \
+  mvn-opts "-DaltDeploymentRepository=staging::default::file:${M}" \
+  mvn-params "-DaltReleaseDeploymentRepository=${R}"
+# Without --allow the same m2repo source is still named, which is what
+# the guard's warning reports.
+attributed "mvn-opts${TAB}altDeploymentRepository" \
+  mvn-opts "-DaltDeploymentRepository=staging::default::file:${M}"
 
 # has_globbing_word: Maven's launcher expands MAVEN_ARGS unquoted, so a
 # pattern matching a file in the checkout reaches Maven as that file's
