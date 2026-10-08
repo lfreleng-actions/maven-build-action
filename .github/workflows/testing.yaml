@@ -872,6 +872,48 @@ jobs:
           done
           exit "$FAILED"
 
+      # lfit/releng-reusable-workflows' Maven workflows pass this, verbatim,
+      # as their default mvn-opts, and so do their callers. It names the
+      # m2repo the action deploys into anyway, so the action warns and
+      # builds. Maven receives the quotes as part of the URL: on its own
+      # the value deploys under a directory named '"', which the action's
+      # own arguments, placed last, prevent.
+      - name: "Pass a deploy repository naming the m2repo"
+        id: m2repo
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean deploy"
+          # yamllint disable rule:line-length
+          mvn-opts: >-
+            -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+            -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r
+            -DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo
+          # yamllint enable rule:line-length
+          run-jacoco: "false"
+          artifact-upload: "false"
+
+      - name: "Check the build deployed into the m2repo"
+        shell: bash
+        env:
+          ARTIFACT_COUNT: ${{ steps.m2repo.outputs.artifact_count }}
+        run: |
+          FAILED=0
+          if [ "${ARTIFACT_COUNT:-0}" -gt 0 ]; then
+            echo "m2repo holds ${ARTIFACT_COUNT} artefacts ✅"
+          else
+            echo "m2repo holds no artefacts ❌"
+            FAILED=1
+          fi
+          stray="$(find "$GITHUB_WORKSPACE" -name '"' -print -quit)"
+          if [ -n "$stray" ]; then
+            echo "The deploy went to the quoted path: ${stray} ❌"
+            FAILED=1
+          else
+            echo "No deploy under a quoted path ✅"
+          fi
+          exit "$FAILED"
+
   test-failure-scenarios:
     name: "Test Build Failure"
     runs-on: ubuntu-latest

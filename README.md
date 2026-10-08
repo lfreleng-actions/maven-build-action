@@ -199,15 +199,29 @@ assuming a directory.
 #### Callers cannot redirect the deploy
 
 The action **refuses** any of the three properties in the arguments a
-caller supplies: `mvn-phases`, `mvn-profiles`, `mvn-opts`, `mvn-params` and
-`MAVEN_ARGS`. It fails before Maven runs, with an error naming the source
-and the property. Otherwise the action would ignore a caller's request for
-a different deploy repository without notice. Every spelling Maven accepts
-counts: `-Dname=value`, `-D name=value`, `--define name=value`,
-`--define=name=value`, and `-Dname` alone. That includes the two-word forms
-split across inputs, such as `mvn-opts` ending in `-D` with `mvn-params`
-starting with the property: the build passes them as adjacent arguments,
-which Maven reads as one.
+caller supplies unless its value names `${GITHUB_WORKSPACE}/m2repo` as an
+absolute `file:` URL. That covers another directory, a relative path, a
+URL of any other scheme, and `-Dname` alone, which sets the property to
+`true`. The arguments checked are `mvn-phases`, `mvn-profiles`,
+`mvn-opts`, `mvn-params` and `MAVEN_ARGS`. It fails before Maven runs,
+with an error naming the source and the property. Otherwise the action
+would ignore a caller's request for a different deploy repository without
+notice. Every spelling Maven accepts counts: `-Dname=value`,
+`-D name=value`, `--define name=value`, `--define=name=value`, and
+`-Dname` alone. That includes the two-word forms split across inputs, such
+as `mvn-opts` ending in `-D` with `mvn-params` starting with the property:
+the build passes them as adjacent arguments, which Maven reads as one.
+
+A property naming `${GITHUB_WORKSPACE}/m2repo` itself draws a **warning**
+and the build goes on, since it asks for what the action does anyway.
+Callers have long passed
+`-DaltDeploymentRepository=staging::default::file:"${GITHUB_WORKSPACE}"/m2repo`,
+from before the action set the deploy repository itself. The check ignores
+the repository id and layout, and quote characters in the URL. Those quotes
+never worked as intended: Maven receives them as part of the URL, and on
+its own that value deploys under a directory named `"`. The action's own
+arguments, placed last, put the deploy in `m2repo` all the same. Remove the
+argument; it has no effect.
 
 The action also refuses any caller argument that **begins with a double
 quote**. Maven 3.9 rewrites such arguments before reading them: it strips

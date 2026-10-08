@@ -194,7 +194,7 @@ runs:
       with:
         secrets: ${{ inputs.env-secrets }}
 
-    - name: 'Refuse a caller deploy repository'
+    - name: 'Check a caller deploy repository'
       shell: bash
       env:
         MVN_PHASES: ${{ inputs.mvn-phases }}
@@ -209,9 +209,12 @@ runs:
         # The build deploys into ${GITHUB_WORKSPACE}/m2repo and reports
         # that path as m2repo_path. The build step sets the deploy
         # repository after every caller argument, so a caller's own
-        # never takes effect. Refuse one here rather than ignore it
-        # without a word: the caller asked for something this action
-        # will not do, and should hear so before Maven runs.
+        # never takes effect. Refuse one naming anywhere else rather
+        # than ignore it without a word: the caller asked for something
+        # this action will not do, and should hear so before Maven runs.
+        # One naming m2repo itself asks for what the build does anyway,
+        # so it draws a warning and the build goes on; callers carried
+        # that argument from the days the action did not set it.
         #
         # Runs after the env exports, so a MAVEN_ARGS that env-vars or
         # env-secrets injected is checked too, and before the first mvn
@@ -247,7 +250,9 @@ runs:
           mvn-params "$(expand_workspace_vars "$MVN_PARAMS")"
         )
 
-        if found="$(find_caller_deploy_repository "${SOURCES[@]}")"; then
+        M2REPO="${GITHUB_WORKSPACE}/m2repo"
+        if found="$(find_caller_deploy_repository --allow "$M2REPO" \
+            "${SOURCES[@]}")"; then
           source="${found%%$'\t'*}"
           what="${found#*$'\t'}"
           if [ "$what" = "$DEPLOY_REPOSITORY_QUOTE" ]; then
@@ -259,12 +264,20 @@ runs:
               "repository this action fixes, so the action refuses them." \
               "Pass the argument unquoted."
           else
-            echo "::error::Found ${what} in ${source}. This action deploys" \
-              "into \${GITHUB_WORKSPACE}/m2repo and reports it as" \
+            echo "::error::Found ${what} in ${source}, with a value" \
+              "that does not name \${GITHUB_WORKSPACE}/m2repo. This" \
+              "action deploys into m2repo and reports it as" \
               "m2repo_path; publish from there instead of redirecting" \
               "the deploy."
           fi
           exit 1
+        fi
+        # Anything left names m2repo itself. Report the first, and leave
+        # the build to set the same directory last.
+        if found="$(find_caller_deploy_repository "${SOURCES[@]}")"; then
+          echo "::warning::Found ${found#*$'\t'} in ${found%%$'\t'*}," \
+            "naming \${GITHUB_WORKSPACE}/m2repo. The action always" \
+            "deploys there, so the argument has no effect; remove it."
         fi
 
         # The action turns pathname expansion off around its own mvn
@@ -283,7 +296,8 @@ runs:
             "mvn-params, where the action does not expand it."
           exit 1
         fi
-        echo "No caller deploy repository; the build deploys into m2repo ✅"
+        echo "No caller deploy repository elsewhere; the build deploys" \
+          "into m2repo ✅"
 
     - name: 'Resolve JaCoCo coverage mode'
       id: jacoco-mode
@@ -1334,7 +1348,7 @@ runs:
           DEPLOY_ARGS+=("$arg")
         done < <(deploy_repository_args "${GITHUB_WORKSPACE}/m2repo")
 
-        # The 'Refuse a caller deploy repository' step mirrors the order
+        # The 'Check a caller deploy repository' step mirrors the order
         # of the caller sources on this line. Change one, change both.
         #
         # Pathname expansion off for the unquoted arguments. A caller's
