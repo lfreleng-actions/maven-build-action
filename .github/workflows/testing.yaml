@@ -672,6 +672,74 @@ jobs:
           ./tests/check-subproject-coverage.sh \
             tests/fixtures/multi-subproject expect-none
 
+  # The action's own step variables carry its inputs into the scripts
+  # that start Maven. Exported, they would reach the build, where a POM
+  # could activate a profile on env.MVN_PHASES or read GLOBAL_SETTINGS
+  # and the credentials in it. A recording mvn first on PATH saves the
+  # environment of every Maven run the action starts: the JaCoCo probe,
+  # the build and the report pass. The check fails on any step env:
+  # name of action.yaml in any of them, so it covers names added later,
+  # and requires a caller's variable in each, so a recorder that saw
+  # nothing cannot pass.
+  test-maven-environment:
+    name: "Test Maven Environment"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    env:
+      # Reaches every Maven run, as a caller's own variable would
+      CALLER_MARKER: "present"
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # As the action reads it. Passing this as mvn-version skips the
+      # action's Setup Maven, which would otherwise put a Maven of its
+      # own ahead of the recorder on PATH.
+      - name: "Read the runner's Maven version"
+        id: maven
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(mvn -q -v | tr -d '\r\n')"
+          echo "Runner Maven: ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: "Record every Maven invocation"
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/maven-environment.sh install \
+            "$RUNNER_TEMP/mvn-recorder" "$RUNNER_TEMP/mvn-records"
+          echo "$RUNNER_TEMP/mvn-recorder" >> "$GITHUB_PATH"
+
+      # JaCoCo on, so the probe and the report pass run Maven as well
+      - name: "Build the fixture reactor"
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-version: ${{ steps.maven.outputs.version }}
+          mvn-phases: "clean verify"
+          run-jacoco: "true"
+          artifact-upload: "false"
+
+      # One goal per Maven run: the build's clean, the probe's
+      # help:effective-pom and the report pass's report goal
+      - name: "Check no Maven run saw a step variable"
+        shell: bash
+        run: |
+          ./tests/maven-environment.sh check action.yaml \
+            "$RUNNER_TEMP/mvn-records" CALLER_MARKER \
+            clean help:effective-pom org.jacoco:jacoco-maven-plugin:report
+
   test-m2repo-contract:
     name: "Test m2repo Contract"
     runs-on: ubuntu-latest

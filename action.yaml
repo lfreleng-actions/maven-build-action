@@ -315,6 +315,12 @@ runs:
         # Decide where the subprojects write their coverage data
         set -euo pipefail
 
+        # The env: names above are this step's own, not the caller's, so
+        # keep them out of the probe's environment, as the build step
+        # does; that step explains why.
+        export -n PATH_PREFIX MVN_POM_FILE MVN_PROFILES MVN_OPTS \
+          MVN_PARAMS JACOCO_MODE RUN_JACOCO GLOBAL_SETTINGS
+
         # A Maven build with subprojects runs the JaCoCo agent once per
         # subproject, and each writes its own execution data. A report
         # built from one of those files carries the lines that
@@ -1258,6 +1264,19 @@ runs:
       run: |
         echo "Maven build starting"
 
+        # The env: names above carry this action's inputs into the
+        # script, and are no part of its interface. Exported, they would
+        # reach Maven and every JVM it forks: a POM could activate a
+        # profile on env.MVN_PHASES, or read env.GLOBAL_SETTINGS, which
+        # holds the settings document and its credentials. A build would
+        # then depend on how this action was called, and a tool reading
+        # the reactor beside it, such as maven-snapshot-metadata-action's
+        # fetch, would see a different one. Unexport rather than unset:
+        # the script still reads them. A caller wanting a variable in
+        # the build has env-vars and env-secrets.
+        export -n PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE \
+          MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS
+
         if [ -n "$GLOBAL_SETTINGS" ]; then
           # Written under RUNNER_TEMP, not the workspace, and created with
           # mktemp rather than at a fixed name.
@@ -1396,6 +1415,13 @@ runs:
       run: |
         # Report every subproject against the shared execution data
         set -euo pipefail
+
+        # The env: names above are this step's own, not the caller's, so
+        # keep them out of the report's environment, as the build step
+        # does; that step explains why.
+        export -n BUILD_OUTCOME PATH_PREFIX MVN_POM_FILE MVN_PROFILES \
+          JACOCO_MODE DATA_FILE MARKER_FILE SNAPSHOT_FILE EXTRA_LIST_FILE \
+          DATA_PREEXISTING GLOBAL_SETTINGS MVN_OPTS MVN_PARAMS
 
         # The marker belongs to this step now, and both branches below
         # exit before the settings file exists. Claim it up front so a

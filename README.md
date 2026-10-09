@@ -501,7 +501,13 @@ This action performs the following steps:
    variables using `infovista-opensource/vars-to-env-action`; skipped when
    `env-secrets` holds an empty string or `{}`
 5. **Build with Maven**: Executes the Maven build with the specified phases,
-   options, and parameters
+   options, and parameters. Maven inherits the job's environment, the
+   variables exported in steps 3 and 4 included, but not the step variables
+   the action uses to pass its own inputs to its scripts, such as
+   `MVN_PHASES` or `GLOBAL_SETTINGS`: a POM cannot activate a profile on
+   how a caller invoked the action, nor read the settings document from the
+   environment. The same holds for the JaCoCo probe and report passes. Pass
+   anything the build should see through `env-vars` or `env-secrets`.
 6. **Generate JaCoCo Badge**: Creates coverage badges and summary (if JaCoCo
    runs and not executing locally)
 7. **Generate build summary and outputs**: Publishes action outputs (m2repo
