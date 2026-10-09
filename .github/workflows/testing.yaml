@@ -1025,3 +1025,115 @@ jobs:
         run: |
           # Validated failure scenario
           echo "Validated failure scenario: invalid path_prefix ✅"
+
+  # The Maven releases and Java versions the Java/Maven estate tests
+  # against, published by java-workflows for every repository in it.
+  versions:
+    name: "Java/Maven versions"
+    permissions: {}
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/java-workflows/.github/workflows/java-maven-versions.yaml@c0a33e2ec6357244055df8b32aaf78d94e2b9514  # main
+
+  # The action on every Maven release and JDK under test. The jobs
+  # above prove its features on one toolchain; this one proves the
+  # toolchain on the paths most exposed to Maven's own behaviour: a
+  # deploy continuing a seeded buildNumber, which Maven's resolver
+  # writes (3.10 moved to the Resolver 2 lineage Maven 4 uses), and
+  # coverage aggregated across subprojects, which reads what Maven
+  # reports about the reactor.
+  compatibility:
+    # yamllint disable-line rule:line-length
+    name: "Compatibility (Maven ${{ matrix.maven.line }}, JDK ${{ matrix.java }})"
+    needs: versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        maven: ${{ fromJSON(needs.versions.outputs.maven) }}
+        java: ${{ fromJSON(needs.versions.outputs.java) }}
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Seed m2repo before the build"
+        shell: bash
+        run: ./tests/m2repo-contract.sh seed "$GITHUB_WORKSPACE/m2repo"
+
+      - name: "Deploy the fixture reactor with coverage"
+        id: build
+        uses: $/
+        with:
+          java-version: ${{ matrix.java }}
+          mvn-version: ${{ matrix.maven.version }}
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean deploy"
+          run-jacoco: "true"
+          # The default artifact name is the same in every cell
+          artifact-upload: "false"
+
+      - name: "Check the toolchain under test"
+        shell: bash
+        env:
+          WANT_MAVEN: ${{ matrix.maven.version }}
+          WANT_JAVA: ${{ matrix.java }}
+        run: |
+          set -euo pipefail
+          version="$(mvn --version)"
+          echo "${version}"
+          status=0
+          if ! grep -qF "Apache Maven ${WANT_MAVEN} (" <<< "${version}"; then
+            echo "::error::mvn is not Maven ${WANT_MAVEN}"
+            status=1
+          fi
+          if ! grep -qE "^Java version: ${WANT_JAVA}[.,]" <<< "${version}"; then
+            echo "::error::Maven does not run on JDK ${WANT_JAVA}"
+            status=1
+          fi
+          case "${JAVA_HOME:-}" in
+            *Temurin*) ;;
+            *) echo "::error::JAVA_HOME is not a Temurin JDK"; status=1 ;;
+          esac
+          exit "${status}"
+
+      - name: "Check the deploy continued the seeded m2repo"
+        shell: bash
+        env:
+          M2REPO_PATH: ${{ steps.build.outputs.m2repo_path }}
+        run: |
+          ./tests/m2repo-contract.sh check \
+            "$GITHUB_WORKSPACE/m2repo" "$M2REPO_PATH"
+
+      - name: "Check coverage crosses the subproject boundary"
+        shell: bash
+        env:
+          COVERAGE: ${{ steps.build.outputs.coverage }}
+        run: |
+          set -euo pipefail
+          ./tests/check-subproject-coverage.sh \
+            tests/fixtures/multi-subproject expect-covered
+          if [ -z "$COVERAGE" ]; then
+            echo "::error::The coverage output is empty despite reports"
+            exit 1
+          fi
+          echo "Coverage reported: $COVERAGE"
+
+      # The toolchain on PATH proves what the action installed; the
+      # deployed jars and the Surefire reports prove what the build
+      # itself ran on.
+      - name: "Check the build ran on that JDK"
+        shell: bash
+        env:
+          WANT_JAVA: ${{ matrix.java }}
+        run: |
+          ./tests/check-build-jdk.sh "$GITHUB_WORKSPACE/m2repo" \
+            tests/fixtures/multi-subproject "$WANT_JAVA"

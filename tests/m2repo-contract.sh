@@ -41,11 +41,15 @@ MARKER="${M2REPO}/org/example/sentinel/1.0/sentinel.marker"
 MARKER_TEXT='seeded before the build; must survive the deploy'
 
 build_number() {
+  # Maven 4 writes the metadata in the METADATA/1.1.0 namespace, where
+  # 3.x writes none, so match the elements in any namespace.
   python3 - "$1" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
-node = ET.parse(sys.argv[1]).find('./versioning/snapshot/buildNumber')
+node = ET.parse(sys.argv[1]).find(
+    './{*}versioning/{*}snapshot/{*}buildNumber'
+)
 print(node.text.strip() if node is not None and node.text else 'missing')
 PY
 }
