@@ -740,6 +740,60 @@ jobs:
             "$RUNNER_TEMP/mvn-records" CALLER_MARKER \
             clean help:effective-pom org.jacoco:jacoco-maven-plugin:report
 
+  # env-vars and env-secrets export through vars-to-env-action, which
+  # upper-cases each name. A later step must see the variables from
+  # both inputs under those names, a multi-line value intact, and no
+  # copy under the name as given.
+  test-env-export:
+    name: "Test Environment Export"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout maven-build-action repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Build with env-vars and env-secrets"
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/multi-subproject"
+          mvn-phases: "clean package"
+          run-jacoco: "false"
+          artifact-upload: "false"
+          env-vars: '{"export_var": "from-vars", "multi_line": "a\nb"}'
+          env-secrets: '{"export_secret": "from-secrets"}'
+
+      - name: "Check the exported environment"
+        shell: bash
+        run: |
+          # Check the exported environment
+          set -euo pipefail
+          status=0
+          expect() {
+            if [ "${!1-}" != "$2" ]; then
+              echo "::error::$1 does not hold the value its input gave"
+              status=1
+            fi
+          }
+          expect EXPORT_VAR 'from-vars'
+          expect EXPORT_SECRET 'from-secrets'
+          expect MULTI_LINE $'a\nb'
+          for name in export_var export_secret multi_line; do
+            if [ -n "${!name+set}" ]; then
+              echo "::error::${name} was exported without upper-casing"
+              status=1
+            fi
+          done
+          exit "${status}"
+
   test-m2repo-contract:
     name: "Test m2repo Contract"
     runs-on: ubuntu-latest
