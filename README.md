@@ -495,10 +495,10 @@ This action performs the following steps:
    using `s4u/maven-settings-action`, which removes the file again when the
    job ends
 3. **Export Environment Variables**: Exports GitHub variables as environment
-   variables using `infovista-opensource/vars-to-env-action`; skipped when
+   variables using `lfreleng-actions/vars-to-env-action`; skipped when
    `env-vars` holds an empty string or `{}`
 4. **Export Environment Secrets**: Exports GitHub secrets as environment
-   variables using `infovista-opensource/vars-to-env-action`; skipped when
+   variables using `lfreleng-actions/vars-to-env-action`; skipped when
    `env-secrets` holds an empty string or `{}`
 5. **Build with Maven**: Executes the Maven build with the specified phases,
    options, and parameters. Maven inherits the job's environment, the
@@ -527,3 +527,7 @@ and reproducibility.
 - Coverage badges generate in the `badges` directory if JaCoCo runs
 - The global settings file (if provided) must contain your Maven repository
   configuration
+- Steps 3 and 4 need Python 3.9 or newer on `PATH`, as `python3` or `python`,
+  whenever `env-vars` or `env-secrets` holds variables to export.
+  GitHub-hosted runners provide it; on a self-hosted runner, install it
+  before calling this action
