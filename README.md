@@ -262,6 +262,18 @@ the POM leaves unset and no other. That is the project's build
 configuration, not a caller argument. Remove it from a project that
 publishes through this action.
 
+### Supported Maven and Java versions
+
+The `compatibility` job in `.github/workflows/testing.yaml` runs the action
+on every Maven release and Java version the Java/Maven repositories test
+against, which the `java-maven-versions.yaml` reusable workflow in
+[java-workflows](https://github.com/lfreleng-actions/java-workflows)
+publishes: Maven 3.9, 3.10 and 4, on Temurin JDK 17 and 21 to 25. Each
+combination deploys the multi-subproject fixture onto a seeded `m2repo`,
+holding the contract above, aggregates coverage across its subprojects,
+and proves from the deployed jars and the test reports that the build ran
+on the JDK it asked for.
+
 ### Coverage across Maven subprojects (jacoco-mode)
 
 A Maven build with subprojects runs the JaCoCo agent once per subproject, and
