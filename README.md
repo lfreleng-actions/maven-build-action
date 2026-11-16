@@ -539,7 +539,7 @@ and reproducibility.
 - Coverage badges generate in the `badges` directory if JaCoCo runs
 - The global settings file (if provided) must contain your Maven repository
   configuration
-- Steps 3 and 4 need Python 3.9 or newer on `PATH`, as `python3` or `python`,
+- Steps 3 and 4 need Python 3.10 or newer on `PATH`, as `python3` or `python`,
   whenever `env-vars` or `env-secrets` holds variables to export.
   GitHub-hosted runners provide it; on a self-hosted runner, install it
   before calling this action

@@ -183,14 +183,14 @@ runs:
     - name: 'Export env variables'
       if: ${{ inputs.env-vars != '' && inputs.env-vars != '{}' }}
       # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/vars-to-env-action@72cd8dd1bf83e9861a111f59e1e02f04ba82a5dc # v0.0.1
+      uses: lfreleng-actions/vars-to-env-action@963c7fcc2a9054f325f43a60ac898b05a99ce5f5 # v1.0.0
       with:
         secrets: ${{ inputs.env-vars }}
 
     - name: 'Export env secrets'
       if: ${{ inputs.env-secrets != '' && inputs.env-secrets != '{}' }}
       # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/vars-to-env-action@72cd8dd1bf83e9861a111f59e1e02f04ba82a5dc # v0.0.1
+      uses: lfreleng-actions/vars-to-env-action@963c7fcc2a9054f325f43a60ac898b05a99ce5f5 # v1.0.0
       with:
         secrets: ${{ inputs.env-secrets }}
 
