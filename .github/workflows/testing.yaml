@@ -1086,7 +1086,7 @@ jobs:
     name: "Java/Maven versions"
     permissions: {}
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/java-workflows/.github/workflows/java-maven-versions.yaml@1e5aae1c31ef26070fce3e8917be6c2b2a26fbb8  # v0.8.0
+    uses: lfreleng-actions/java-workflows/.github/workflows/java-maven-versions.yaml@535e49d8407dc4dbca224c8f389716208fbee155  # v0.8.1
 
   # The action on every Maven release and JDK under test. The jobs
   # above prove its features on one toolchain; this one proves the
